@@ -6,3 +6,6 @@ Dashboard.Port = ${DASHBOARD_PORT}
 Dashboard.MapRoot = ${DATA_DIR}/dashboard-maps
 Dashboard.CommandToken = ${REDACTED}
 Dashboard.DataRoot = ${DATA_DIR}/dashboard-data
+Dashboard.Settings.Keys = OllamaChat.Enable,OllamaChat.Conversation.Enable,OllamaChat.Conversation.HoldSeconds,OllamaChat.Conversation.MaxDistance,OllamaChat.Conversation.HoldStill,OllamaChat.Delivery.Split,OllamaChat.Delivery.MaxMessages,OllamaChat.MaxReplyLength,OllamaChat.Reply.Model,OllamaChat.Reply.NumPredict,OllamaChat.PlayerReplyChance.Say,OllamaChat.BlacklistMastersOnly
+Dashboard.Settings.File = modules/mod_ollama_chat.conf
+Dashboard.Settings.ReloadCommand = "ollama reload"
