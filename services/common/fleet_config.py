@@ -14,9 +14,21 @@ use four and batch takes three, so neither ever takes all eight. One number coul
 
 Falls back to the values that were hardcoded before this existed, so a realm with no fleet.toml still
 runs — the same way site.py falls back to worldserver.conf.
+
+**The operator's own changes are a second file, laid over this one.** The dashboard's model panel (lore
+gate, `fleet_admin.py`) saves which model a backend is told and the order of a route's backends into
+`site/fleet.override.json`, so the hand-commented fleet.toml is never rewritten by a program. `load()` puts
+that file on top, and everything that reads the fleet through it sees the change. The file can change only
+two things -- a backend's model name and a route's list of already-defined backends -- and a hand-edited
+file that asks for anything else, or names something fleet.toml does not have, is ignored for that entry,
+loudly and once. Delete the file and the realm is exactly what fleet.toml says.
 """
 
+import copy
+import hashlib
+import json
 import os
+import re
 import sys
 
 try:
@@ -46,21 +58,149 @@ def path():
     return os.environ.get("FLEET_TOML") or os.path.join(site.SITE_DIR, "fleet.toml")
 
 
-def load(strict=False):
-    """The whole file as a dict. `strict` refuses the fallback, for callers that would rather stop."""
+# --- the operator's overrides ---------------------------------------------------------------------------
+
+OVERRIDE_VERSION = 1
+OVERRIDE_MAX_BYTES = 64 * 1024
+MAX_CHAIN = 16
+# What a model name may look like. Real ones are slugs and file names ("qwen3-14b", "anthropic/claude-haiku-4.5",
+# "qwen/qwen3-next-80b:free", "llama-3.1-8b@q4_k_m"): no spaces, no quotes, no control characters. The same rule
+# stops a pasted sentence being sent to a provider as a model.
+MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+=~-]{0,199}")
+
+
+def override_path():
+    """Beside the fleet.toml in use, unless FLEET_OVERRIDE says otherwise (a different user may need to
+    write it than the one that owns site/)."""
+    return os.environ.get("FLEET_OVERRIDE") or os.path.join(os.path.dirname(path()), "fleet.override.json")
+
+
+def check_model(raw):
+    """The model name to store for what was typed, or ValueError saying what is wrong, in plain words."""
+    if not isinstance(raw, str):
+        raise ValueError("A model name is text.")
+    text = raw.strip()
+    if not text:
+        raise ValueError("A model name cannot be empty. Use Reset to go back to fleet.toml's.")
+    if not MODEL_RE.fullmatch(text):     # fullmatch: `$` would let a trailing newline through
+        raise ValueError("A model name is letters, digits and . _ : / @ + = ~ - only, up to 200 long, with no "
+                         "spaces or quotes.")
+    return text
+
+
+_warned = set()
+
+
+def _warn(message):
+    """Said once per distinct message: load() runs on every request in some services."""
+    if message not in _warned:
+        _warned.add(message)
+        print(f"fleet: {message}", file=sys.stderr, flush=True)
+
+
+def read_override(p=None):
+    """(document, problem). No file is no override and no problem; a file that cannot be used is both."""
+    p = p or override_path()
+    try:
+        with open(p, "rb") as fh:
+            raw = fh.read(OVERRIDE_MAX_BYTES + 1)
+    except FileNotFoundError:
+        return {}, None
+    except OSError as e:
+        return {}, f"cannot read {p}: {e.strerror or e}"
+    if len(raw) > OVERRIDE_MAX_BYTES:
+        return {}, f"{p} is too large to be one of ours; ignored"
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        return {}, f"{p} is not valid JSON; ignored"
+    if not isinstance(doc, dict) or doc.get("version") != OVERRIDE_VERSION:
+        return {}, f"{p} is not a version {OVERRIDE_VERSION} override file; ignored"
+    return doc, None
+
+
+def apply_override(cfg, doc):
+    """A copy of `cfg` with the saved choices on top. The one passed in is never touched (it may be the
+    module's fallback, shared by every caller). An entry that does not fit this fleet.toml is skipped on its
+    own, so one stale line cannot undo the rest."""
+    out = copy.deepcopy(cfg)
+    backends = out.get("backends") or {}
+    routes = out.get("routes") or {}
+    applied = {"models": {}, "routes": {}}
+    models = doc.get("models")
+    for name, model in (models.items() if isinstance(models, dict) else ()):
+        try:
+            if not isinstance(backends.get(name), dict):
+                raise ValueError(f"fleet.toml has no backend {name!r}")
+            model = check_model(model)
+        except ValueError as e:
+            _warn(f"override for model of {name!r} ignored: {e}")
+            continue
+        backends[name]["model"] = model
+        applied["models"][name] = model
+    chains = doc.get("routes")
+    for name, chain in (chains.items() if isinstance(chains, dict) else ()):
+        problem = None
+        if name not in routes:
+            problem = f"fleet.toml has no route {name!r}"
+        elif not isinstance(chain, list) or not chain or len(chain) > MAX_CHAIN:
+            problem = "a route needs a short, non-empty list of backends"
+        elif not all(isinstance(n, str) and isinstance(backends.get(n), dict) for n in chain):
+            problem = "it names a backend fleet.toml does not define"
+        elif len(set(chain)) != len(chain):
+            problem = "it names a backend twice"
+        if problem:
+            _warn(f"override for route {name!r} ignored: {problem}")
+            continue
+        routes[name] = list(chain)
+        applied["routes"][name] = list(chain)
+    revision = doc.get("revision")
+    out["_override"] = {"revision": revision if isinstance(revision, int) and revision >= 0 else 0,
+                        "applied": applied}
+    return out
+
+
+def fingerprint(cfg=None):
+    """A short digest of what the fleet says to use: each backend's model, each route's backends in order.
+    The router reports it and the gate compares, so "is the router using what I saved" has an answer
+    without either side sending the other its config. It does not include keys or addresses."""
+    cfg = cfg or load()
+    effective = {
+        "models": {n: (b or {}).get("model", "local") for n, b in (cfg.get("backends") or {}).items()},
+        "routes": {r: list(dict.fromkeys(resolve(n, cfg) for n in names))
+                   for r, names in (cfg.get("routes") or {}).items()},
+    }
+    blob = json.dumps(effective, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:12]
+
+
+def load(strict=False, overrides=True):
+    """The whole file as a dict. `strict` refuses the fallback, for callers that would rather stop.
+    `overrides=False` is fleet.toml alone, which is what the model panel compares the operator's changes to."""
     p = path()
     if not os.path.exists(p):
         if strict:
             sys.exit(f"no {p} — copy site.example/fleet.toml and describe your model servers")
-        return _FALLBACK
-    if tomllib is None:
-        sys.exit("python 3.11+ is needed to read fleet.toml (tomllib)")
-    with open(p, "rb") as fh:
-        data = tomllib.load(fh)
-    for section in ("backends", "routes"):
-        if not data.get(section):
-            sys.exit(f"{p} has no [{section}] — see site.example/fleet.toml")
-    return data
+        data = _FALLBACK
+    else:
+        if tomllib is None:
+            sys.exit("python 3.11+ is needed to read fleet.toml (tomllib)")
+        with open(p, "rb") as fh:
+            data = tomllib.load(fh)
+        for section in ("backends", "routes"):
+            if not data.get(section):
+                sys.exit(f"{p} has no [{section}] — see site.example/fleet.toml")
+    if not overrides:
+        return data
+    doc, problem = read_override()
+    if problem:
+        _warn(problem)
+        # Carried on the result so a long-running reader (the router) can tell "no changes saved" from "a file of
+        # changes that cannot be used", and keep what it has instead of falling back to fleet.toml.
+        out = copy.deepcopy(data)
+        out["_override"] = {"revision": 0, "applied": {"models": {}, "routes": {}}, "problem": problem}
+        return out
+    return apply_override(data, doc) if doc else data
 
 
 def resolve(name, cfg=None):

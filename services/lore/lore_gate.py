@@ -34,6 +34,10 @@ and caps bodies at 1024 bytes, which is why this is a separate door):
   POST /voice-decline        throw a candidate away
   POST /voice-line           one line said in their locked voice, cached forever
   POST /voice-export         a section's recorded lines as a zip: files, two mixed tracks, subtitles
+  GET  /models               which model each backend is told and each route's backends, in order; whether
+                             each key is set (never the key); whether the router has picked it up
+  POST /models-set           change a backend's model name, or the order of a route's backends. Nothing else:
+                             no address, key or new backend. Off unless MODEL_SETTINGS_ENABLED=1
 
 Nothing here touches a game object: it runs outside the worldserver like regard and the chronicler,
 and writes only the lore tables. Lore reaches prompts after `gen_backstories.py project` and a
@@ -66,6 +70,11 @@ import era as eras          # noqa: E402
 import fleet                # noqa: E402
 import gen_backstories as g  # noqa: E402
 
+# The model panel's rules and file live with the fleet loader, in common/, because the router reads the same
+# file. The gate only opens the door (do_GET / do_POST, below); nothing about models is decided here.
+sys.path.insert(0, os.path.join(REPO, "services"))
+from common import fleet_admin  # noqa: E402
+
 # A journey's story is written by the chronicler's scribes (plan 53); the gate only opens the door to
 # them. Nothing here knows how a story is made, and the gate is the door because mod-dashboard caps a
 # body at 1024 bytes and never answers a preflight -- the same reason everything else here is here.
@@ -87,6 +96,7 @@ DEFAULT_LANE = "evo-quality"
 # One draft in flight per character, and a floor between calls. The core's own addon flood throttle
 # is dead code (plan 28 §1), and nothing else upstream stops a keypress driving inference.
 MIN_SECONDS_BETWEEN = 5
+MODELS_BODY_MAX = 16 * 1024      # a model-panel change is a few hundred bytes; this is generous
 _busy = set()
 _last_call = {}
 _gate_lock = threading.Lock()
@@ -316,6 +326,8 @@ def full_doc():
 def publish():
     """The page's read file. `generated` matters: api.js only redraws when the stamp changes."""
     doc = full_doc()
+    # Tells the dashboard whether to show the Models panel at all. Off unless the operator turned it on.
+    doc["model_settings"] = MODEL_SETTINGS
     os.makedirs(os.path.dirname(EDIT_JSON), exist_ok=True)
     with open(EDIT_JSON + ".tmp", "w") as f:
         json.dump(doc, f, separators=(",", ":"))
@@ -677,7 +689,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
-    def _authed(self):
+    def _authed(self, pausable=True):
         if not TOKEN:
             self._send(503, {"ok": False, "message": "The gate has no token set, so it stays shut."})
             return False
@@ -685,7 +697,7 @@ class Handler(BaseHTTPRequestHandler):
         if len(given) != len(TOKEN) or not _constant_eq(given, TOKEN):
             self._send(401, {"ok": False, "message": "That token is not this gate's."})
             return False
-        if os.path.exists(PAUSE_FILE):
+        if pausable and os.path.exists(PAUSE_FILE):
             self._send(503, {"ok": False, "message": "The gate is paused."})
             return False
         return True
@@ -696,6 +708,11 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        # Before the pause check: PAUSE stops the gate writing lore and calling models, and choosing which
+        # model a backend uses calls none. The operator who paused it to stop a spend is the one who needs
+        # to change the model.
+        if urlparse(self.path).path == "/models":
+            return self._models()
         if not self._authed():
             return
         if self.path.startswith("/rules"):
@@ -745,6 +762,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"ok": False, "message": "No such door."})
 
     def do_POST(self):
+        if urlparse(self.path).path == "/models-set":
+            return self._models()
         if not self._authed():
             return
         try:
@@ -881,6 +900,50 @@ class Handler(BaseHTTPRequestHandler):
                 [k.strip() for k in str(body.get("keep_story", "")).split(",") if k.strip()]))
         return self._send(200, {"ok": True, "job": job["id"], "state": job["state"]})
 
+    # -- which model each part of the realm uses --------------------
+
+    def _models(self):
+        """The model panel's door. The token is the gate's own, as for everything here; it is NOT ended by
+        PAUSE (see do_GET), and it answers "off" rather than doing anything unless the operator set
+        MODEL_SETTINGS_ENABLED=1. All rules are in common/fleet_admin.py."""
+        if not self._authed(pausable=False):
+            return
+        post = self.command == "POST"
+        if not MODEL_SETTINGS:
+            return self._send(403 if post else 200, {
+                "ok": not post, "enabled": False,
+                "message": "Model settings are off. Set MODEL_SETTINGS_ENABLED=1 in site/site.env and restart "
+                           "the lore gate."})
+        try:
+            if not post:
+                return self._send(200, {"ok": True, "enabled": True, "fleet": fleet_admin.view()})
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                length = -1
+            if length < 0 or length > MODELS_BODY_MAX:
+                return self._send(413, {"ok": False, "message": "That change is too large to be one of ours."})
+            try:
+                patch = json.loads(self.rfile.read(length) or b"{}")
+            except ValueError:
+                return self._send(400, {"ok": False, "message": "That was not readable."})
+            try:
+                changed, summary = fleet_admin.save(patch)
+            except fleet_admin.Refused as refusal:
+                body = {"ok": False, "message": refusal.message}
+                if refusal.status == 409:
+                    body.update(enabled=True, fleet=fleet_admin.view())
+                return self._send(refusal.status, body)
+            if changed:
+                log("models: saved: " + "; ".join(summary))
+            return self._send(200, {
+                "ok": True, "enabled": True, "changed": changed, "fleet": fleet_admin.view(),
+                "message": ("Saved. The router picks it up within a few seconds." if changed
+                            else "That is already how it is set.")})
+        except Exception as err:                 # noqa: BLE001 - a fault here answers, it never drops the line
+            log(f"models: {self.path}: {err!r}")
+            return self._send(500, {"ok": False, "message": f"The model settings broke off: {err}"})
+
     # -- voices (plan 57) ----------------------------------------------------
 
     def _voice(self, fn):
@@ -996,10 +1059,11 @@ TOKEN = ""
 ORIGINS = ["*"]
 ERA = g.site.get("ERA", "classic")   # the world's clock, from site.env (plan 23 W8)
 ACCOUNTS = []
+MODEL_SETTINGS = False               # MODEL_SETTINGS_ENABLED in site.env; off unless asked for
 
 
 def main():
-    global TOKEN, ORIGINS, ERA, ACCOUNTS
+    global TOKEN, ORIGINS, ERA, ACCOUNTS, MODEL_SETTINGS
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=int(_site("LORE_GATE_PORT", "8788")))
     ap.add_argument("--bind", default=_site("LORE_GATE_BIND", "127.0.0.1"))
@@ -1017,6 +1081,7 @@ def main():
     ORIGINS = [o.strip() for o in args.origin.split(",") if o.strip()] or ["*"]
     ERA = args.era
     ACCOUNTS = [int(a) for a in args.accounts.replace(",", " ").split() if a.strip().isdigit()]
+    MODEL_SETTINGS = str(_site("MODEL_SETTINGS_ENABLED", "0")).strip().lower() in ("1", "true", "yes", "on")
     g.ensure_schema()
     # Voices are optional (plan 57). Whatever goes wrong setting them up, the rest of the gate -- lore,
     # alts, stories -- must still open.
@@ -1027,6 +1092,8 @@ def main():
         log(f"voices: could not be set up, so they stay off: {err!r}")
         voices.disable(repr(err))
     log(f"writing for accounts: {ACCOUNTS or allowed_accounts()}")
+    log("model settings: " + ("on (GET /models, POST /models-set)" if MODEL_SETTINGS
+                              else "off (MODEL_SETTINGS_ENABLED=1 turns the panel on)"))
 
     if args.publish_only:
         log(f"published {publish()} characters to {EDIT_JSON}")

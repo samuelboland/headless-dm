@@ -6,6 +6,11 @@
 #
 # The profile below is the single-endpoint one: one llama-server, one Qwen3 14B-class instruct model.
 # It is what the clean-room setup is tested against, and it is enough to run a realm.
+#
+# The dashboard's Models panel (MODEL_SETTINGS_ENABLED=1 in site.env) can change a backend's `model` and the
+# order of a route's backends. It keeps those changes in site/fleet.override.json, laid over this file, and
+# never rewrites this one. What the panel changed overrides what is written here; delete the override file
+# (or press "Back to fleet.toml" in the panel) to get exactly what is written here again.
 
 [router]
 # Where mod-ollama-chat sends its generations. The module knows only this address.

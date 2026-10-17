@@ -269,3 +269,85 @@ you want (all default `0`; range, cooldown and wording keys are documented in th
 - The chronicler no longer tells an ordinary elite killed inside a dungeon as a deed (they are the trash).
 - `[judge] fallback` in `fleet.toml` (optional): a second backend for the era judge, asked when the first refuses.
 - `dm.py` notices when the core hands a new run an instance id an earlier run had.
+
+## 10. Choosing the models from the dashboard (optional)
+
+**Off unless you turn it on.** The dashboard's **Models** panel shows which language model each part of the
+realm uses. It changes two things: the model name a backend is told, and the order of a route's backends.
+It never changes an address, an API key or the list of backends. Those stay in `site/fleet.toml` and
+`site/secrets.env`, and you edit them by hand.
+
+**What the panel shows**
+
+- Every chat route (ambient, quality, chronicle, prose, utility, moment) with its backends in order, and each
+  backend's model. You can move a backend up or down, take it out, or add one that `fleet.toml` already defines.
+- Every backend, with "key set", "no key" or "no key needed". It never shows the key. It says what uses the
+  backend, and lets you type a new model name.
+- The writing lanes and the judge, **read-only**. They use the same backends, so changing a backend's model
+  changes them too. Which backend a lane or the judge uses is still set in `fleet.toml` (`[batch]`, `[judge]`).
+- Whether the router is using what you saved, and what each kind of change needs (below).
+
+**How it works.** The panel talks to the lore gate, not the worldserver, for the reason the Journey stories do:
+mod-dashboard caps a body at 1024 bytes, answers no preflight and drains commands on the world thread. It needs
+the lore gate's token, the same one the Lore panel uses. Your changes are saved in `site/fleet.override.json`
+and laid over `fleet.toml` when it is read (`services/common/fleet_config.py`). `fleet.toml` is never rewritten,
+so its comments stay. **Delete the override file, or press "Back to fleet.toml", and the realm is exactly what
+`fleet.toml` says.**
+
+The router looks at both files every three seconds and swaps its routes in when either changed. A request that is
+already out finishes on the model it started with. A machine's cap on requests at once is kept across the swap.
+If the new files cannot be used (a half-saved `fleet.toml`, a route left with nobody who can answer), the router
+keeps what it has, says why on its `/health`, and the panel shows it. The router now follows edits to
+`fleet.toml` itself the same way; before, that needed a restart. `[router] bind` and `port` still need one.
+
+### Turning it on
+
+```bash
+# site/site.env
+MODEL_SETTINGS_ENABLED=1
+```
+
+```bash
+systemctl --user restart wow-lore-gate
+sudo systemctl restart wow-router        # once: an older router does not know how to follow the file
+```
+
+Reload the dashboard. A **Models** button appears in the rail, and only while this is on. Enter the lore gate's
+token in the box at the top of the panel. The gate's user has to be able to write in `site/`. If the gate and the
+router run as different users, that is fine: the file is readable by everyone and holds no secret. To keep it
+somewhere else, set `FLEET_OVERRIDE=/path/to/file.json` for both.
+
+### What a change needs
+
+| Change | Takes effect |
+|---|---|
+| A chat route's backends or model | At once: within about three seconds, no restart |
+| The model of a backend that writes for the realm (backstories, chronicle, rumours, the Dungeon Master, the lore gate) | The next piece of work. Each service looks the model up again when it begins a job |
+| The model of the judge | Regard, the chronicler and the Dungeon Master read it **once, when they start**: `systemctl --user restart wow-regard wow-chronicler wow-dm`. The lore gate and one-off commands read it each time |
+| An API key added to `site/secrets.env` | When a service starts. Restart the router. The panel shows what is in the file now |
+
+### Things to know
+
+- **Anyone with the gate's token can change which model answers.** That can cost money on a paid backend, but
+  cannot point the realm at another address or read a key. The token was already enough to write lore for any
+  household, so treat it the same way.
+- **`touch services/lore/PAUSE` does not shut this door.** It stops the gate writing lore and calling models;
+  choosing a model calls none, and the person who paused it to stop a bill is the one who needs to change it.
+- **A route has to keep one backend that can answer.** The panel and the gate refuse a list made only of backends
+  whose key is missing.
+- **Two people saving at once** are told, not silently overwritten: the second save is refused and the page shows
+  the current settings.
+- A model name is letters, digits and `. _ : / @ + = ~ -`, up to 200 long, with no spaces or quotes.
+
+### The model that answers players
+
+`OllamaChat.Reply.Model` is now offered in the Settings panel (`conf/mod_dashboard.overrides`, applied by
+`ops/scripts/conf-apply.py`; the worldserver has to be restarted for the dashboard's own keys). It names a
+**route**, not a model: `ambient`, `quality`, `chronicle`, `prose`, `utility` or `moment`. Anything else is answered
+by `ambient`. Saving it needs the dashboard's command token, then `ollama reload`.
+
+### What it stores
+
+Only `site/fleet.override.json` (ignored by git, like the rest of `site/`): a version, a revision number that
+counts up, and the changed model names and route lists. The module's own notes are in `MODELS.md` in
+mod-dashboard.

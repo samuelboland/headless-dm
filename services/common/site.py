@@ -90,6 +90,17 @@ def get(key, default=None):
     return default if value in (None, "") else value
 
 
+def fresh(key, default=None):
+    """`get`, but read from the files now instead of from what this process loaded when it started.
+
+    For a long-running service that is asked whether a key exists and has to answer for the file as it
+    is, without replacing the values the rest of the process already holds (a half-written secrets.env
+    read through `reload` would blank them all).
+    """
+    value = _load().get(key, os.environ.get(key, default))
+    return default if value in (None, "") else value
+
+
 def need(key, why=""):
     value = get(key)
     if value in (None, ""):
