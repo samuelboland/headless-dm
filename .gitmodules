@@ -1,11 +1,11 @@
 [submodule "src/azerothcore-wotlk"]
 	path = src/azerothcore-wotlk
-	url = https://github.com/mod-playerbots/azerothcore-wotlk.git
-	branch = Playerbot
+	url = https://github.com/samuelboland/azerothcore-wotlk.git
+	branch = perf/exact-optimizations
 [submodule "src/modules/mod-playerbots"]
 	path = src/modules/mod-playerbots
-	url = https://github.com/bazola/mod-playerbots.git
-	branch = custom-wow
+	url = https://github.com/samuelboland/mod-playerbots.git
+	branch = perf/exact-optimizations
 [submodule "src/modules/mod-ollama-chat"]
 	path = src/modules/mod-ollama-chat
 	url = https://github.com/bazola/mod-ollama-chat.git
