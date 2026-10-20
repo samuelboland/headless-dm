@@ -300,7 +300,7 @@ Temperament: {temperament}
 {guild_block}
 {keep_block}Every fact above is this person, drawn for them; write to it, and do not trade any of it for something more dramatic or more typical. Their real name from back home is {earth_name}. "{name}" is what they have gone by here, what the people of this world call them, and the story says "{name}" at least once. A real person is specific and a little contradictory: let their personality, faith and way of talking show in what they notice and how they put things, rather than listing them. Their family background shows only as it would for any real person: no stereotypes. Their fears, what they miss and what they left unfinished are kept beside the story, so tell the story rather than listing those.
 
-Write 170 to 220 words in the second person, speaking to them as "you" and "your". Open somewhere in the life before that belongs to this person alone, and vary the shape of the first sentence: it must not always be "You" followed by a verb, it must not open on waking up here, and it must not open on a scar, a habit, a kept object or a remembered smell. Never begin with "You were born", "You still", "You return", "You keep", "You trace", "Your left", "Your fingers", "Your knuckles" or "The scar". Cover: the life before, your work, and the one you think of most; the moment it happened, when you were {moment}; waking up as a {gender} {race} {cls}, level 1, in a body that is not yours, feeling the levels and skills of this place and a {cls}'s reflexes you do not understand yet, in {start}; the first few days{death_hint}, and finding out there is no way out; what you are doing about it now; {guild_reason}. {knowledge_task} {relation_line} You are a few days in and at the very start of the road: weak, with no great deeds, no battles of note and no history in this world. End with one sentence on how you talk: your real accent and way of speaking from home. Give other invented people from home ordinary American or Canadian names that fit their age; people born in this world have its names. Plain prose only: no title, no lists.
+Write 170 to 220 words in the second person, speaking to them as "you" and "your". Open somewhere in the life before that belongs to this person alone, and vary the shape of the first sentence: it must not always be "You" followed by a verb, it must not open on waking up here, and it must not open on a scar, a habit, a kept object or a remembered smell. Never begin with "You were born", "You still", "You return", "You keep", "You trace", "Your left", "Your fingers", "Your knuckles" or "The scar".{opening} Cover: the life before, your work, and the one you think of most; the moment it happened, when you were {moment}; waking up as a {gender} {race} {cls}, level 1, in a body that is not yours, feeling the levels and skills of this place and a {cls}'s reflexes you do not understand yet, in {start}; the first few days{death_hint}, and finding out there is no way out; what you are doing about it now; {guild_reason}. {knowledge_task} {relation_line} You are a few days in and at the very start of the road: weak, with no great deeds, no battles of note and no history in this world. End with one sentence on how you talk: your real accent and way of speaking from home. Give other invented people from home ordinary American or Canadian names that fit their age; people born in this world have its names. Plain prose only: no title, no lists.
 
 Reply with ONLY a JSON object, no markdown fences: {{"earth_name": "{earth_name}", "backstory": "the story"}}"""
 
@@ -332,6 +332,29 @@ ISEKAI_START = {
     10: "Sunstrider Isle in Eversong Woods, with Silvermoon beyond it",
     11: "Ammen Vale on Azuremyst Isle, with Azure Watch and the Exodar beyond it",
 }
+
+# How a drawn person's story may open (premise.rng_for(guid, "telling")).
+ISEKAI_OPENINGS = [
+    "something someone back home always said to them, told in your words", "a precise ordinary moment at work",
+    "the last text message they sent", "what was in their car or their bag", "an argument they were losing",
+    "a smell of this world that is wrong in a way they cannot name", "a joke they told too often",
+    "the price of something back home", "a small lie they told the week before", "the view from their kitchen window",
+    "a sound they keep listening for here", "the first thing they ate here", "a bill they never paid",
+    "a song stuck in their head", "the weather the day before", "a nickname only one person used",
+    "a question a child asked them", "a TV show they will never see the end of", "their hands, the new ones",
+    "a rule they lived by", "the inside of a church, a bar, a gym or a break room they went to every week",
+    "a mistake at work they still think about", "a promise they made", "how they got their name",
+]
+# How a drawn person's first death may be told.
+ISEKAI_DEATHS = [
+    "the first time you died, told plainly and quickly, the way people tell a car crash",
+    "the first time you died, and the cold, and what you thought about on the walk back",
+    "the first time you died, and how embarrassing it was, and who saw",
+    "the first time you died, and the arrival who sat with you after",
+    "the first time you died, and the hours you lost before you dared go back for your body",
+    "the first time you died, and what killed you, which was something small and stupid",
+    "the first time you died, which you still do not talk about",
+]
 
 KNOWS_TASK = {
     0: ("You have never played World of Warcraft and have no idea where you are: you do not name the game, and "
@@ -428,6 +451,14 @@ def isekai_char_prompt(c, temper, guild, e, bond=None, main_name=None, concept=N
     died = premise.rng_for(c["guid"], "died").random() < 0.4
     death_hint = (", including the first time you died and walked back to your body as a ghost" if died else
                   ", and how close you have come to dying")
+    opening = ""
+    if o.get("personality"):
+        # A drawn person gets a drawn way in and a drawn way to tell their death, so fifty stories do not all
+        # open on "Thirty-one years of..." and all retell the winged spirit in the prompt's own words.
+        r = premise.rng_for(c["guid"], "telling")
+        opening = " Open on " + r.choice(ISEKAI_OPENINGS) + "; never on \"N years of\"."
+        if died:
+            death_hint = ", including " + r.choice(ISEKAI_DEATHS)
     if o.get("player"):
         return ISEKAI_PLAYER_CHAR_PROMPT.format(
             keep_block=keep_block, setting=premise.setting(e), limits=e["limits"], name=c["name"],
@@ -441,6 +472,7 @@ def isekai_char_prompt(c, temper, guild, e, bond=None, main_name=None, concept=N
         gender="female" if c["gender"] else "male", race=race, cls=cls, faction=faction,
         origin_line=premise.origin_line(o), temperament=temper[1], guild_block=guild_block,
         earth_name=o.get("earth_name") or "an ordinary first and last name of their age and background",
+        opening=opening,
         moment=o["moment"],
         start=ISEKAI_START.get(c["race"], "their people's homeland"), death_hint=death_hint,
         guild_reason=guild_reason, knowledge_task=KNOWS_TASK.get(o["knows_game"], KNOWS_TASK[0]),
@@ -627,10 +659,10 @@ def ask_backstory(lane, c, prompt, max_tokens, context, words_range=(70, 300), s
     # more to cover (premise.origin_line): models run past the asked length, and a cut-off reply is no JSON.
     data = extract_json(lane.chat([{"role": "user", "content": prompt}], max_tokens + 450, context=context))
     o = dict(origin_of(c))
-    # Asked for 170 to 220 words, Claude Haiku comes back at 300 to 340 every time; a drawn person has a lot to
-    # tell. Room up to 360 rather than three wasted attempts per person.
+    # Asked for 170 to 220 words, Claude Haiku comes back at 300 to 420; a drawn person has a lot to tell.
+    # Room up to 420 rather than wasted attempts.
     if o.get("personality") and words_range == (70, 300):
-        words_range = (120, 360)
+        words_range = (120, 420)
     text = check_backstory(str(data.get("backstory") or ""), words_range)
     if o.get("player"):
         o["earth_name"] = check_player_earth_name(data.get("earth_name"), c, text, source)
@@ -638,11 +670,9 @@ def ask_backstory(lane, c, prompt, max_tokens, context, words_range=(70, 300), s
         o["country"] = premise.home_country(o["home"])
         return text, o
     if o.get("personality"):
-        # A drawn person (premise.origin with a gender): the name is drawn and rides in the bio with the other
-        # facts (premise.sheet_line), so the story need not say it; it still has to say the name used here.
-        if not re.search(rf"\b{re.escape(c['name'])}\b", text, re.I):
-            raise ValueError(f"story never says the name {c['name']!r} they go by here")
-        o["sheet"] = premise.sheet_line(o)
+        # A drawn person (premise.origin with a gender): both names ride in the bio with the other facts
+        # (premise.sheet_line), so the story need not say either.
+        o["sheet"] = premise.sheet_line(o, c["name"])
         return text, o
     o["earth_name"] = check_earth_name(data.get("earth_name"), c, text)
     return text, o

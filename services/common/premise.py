@@ -196,7 +196,7 @@ def origin_line(o):
         f"\nHow they are taking it: {o['coping']}. What they are doing about it: {o['stance']}.")
 
 
-def sheet_line(o):
+def sheet_line(o, name=None):
     """The drawn facts as the bio says them to the person, in the second person like the story beside it.
 
     The story is a life told in a few hundred words; it cannot carry every fact without running long, so the
@@ -206,13 +206,14 @@ def sheet_line(o):
     if o.get("player") or not o.get("personality"):
         return ""
     lb = o["left_behind"]
+    here = f" Here people call you {name}." if name else ""
     return (f"Back home you were {o['earth_name']}, {o['age']}, "
             f"{'an' if o['job'][0] in 'aeiouAEIOU' else 'a'} {o['job']} from {o['place_kind']} in {o['home']}. "
             f"The one you think of most is {lb['relation']}, {lb['name']}, {lb['age']}. "
             f"When it happened you {o['unfinished']}. You are {'; '.join(o['personality'])}. "
             f"Faith: {o['faith']}. Back home you loved {o['hobby']}. The way you talk: {o['speech']}. "
             f"You miss {o['misses']} most, and you are afraid of {o['fear']}. "
-            f"Here you are {o['coping']}, and {o['stance']}.")
+            f"Here you are {o['coping']}, and {o['stance']}." + here)
 
 
 # ---------------------------------------------------------------------------
