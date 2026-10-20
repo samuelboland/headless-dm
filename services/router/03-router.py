@@ -133,6 +133,8 @@ _LOADED = {"digest": _fleet.fingerprint(_CFG), "revision": (_CFG.get("_override"
 _reload_lock = threading.Lock()
 
 THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+# A JSON reply some rented models wrap in a markdown fence anyway; only a lone fence is unwrapped.
+FENCE_RE = re.compile(r"\A```(?:json)?\s*\n(.*?)\n?```\Z", re.DOTALL)
 
 # --------------------------------------------------------------- helpers --
 
@@ -251,7 +253,10 @@ def call_backend(backend, messages, opts, context=None):
             out = json.loads(resp.read().decode())
         attempt.result = out
         content = out["choices"][0]["message"]["content"] or ""
-        return THINK_RE.sub("", content).strip(), out.get("usage") or {}
+        text = THINK_RE.sub("", content).strip()
+        if opts.get("format") == "json":
+            text = FENCE_RE.sub(r"\1", text).strip()
+        return text, out.get("usage") or {}
 
 def route_call(route_name, messages, opts):
     # One reading of the route table. A reload swaps the whole dict and never edits it, so everything below

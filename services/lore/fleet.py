@@ -37,6 +37,9 @@ from accounting.recorder import record_attempt  # noqa: E402
 
 MAX_ATTEMPTS = 4
 THINK_RE = re.compile(r"<think>.*?</think>\s*", re.S)
+# Some rented models (Claude through OpenRouter) put a JSON reply inside a markdown fence even when
+# json_object is asked for. Only a reply that is one fence and nothing else is unwrapped.
+FENCE_RE = re.compile(r"\A```(?:json)?\s*\n(.*?)\n?```\Z", re.S)
 
 
 class Lane:
@@ -83,6 +86,8 @@ class Lane:
                     out = json.load(r)
                 attempt.result = out
                 text = THINK_RE.sub("", out["choices"][0]["message"].get("content") or "").strip()
+                if json_mode:
+                    text = FENCE_RE.sub(r"\1", text).strip()
         except (urllib.error.URLError, OSError) as e:  # includes timeouts and HTTP errors
             with self.lock:
                 self.fail_streak += 1
