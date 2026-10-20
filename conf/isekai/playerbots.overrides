@@ -1,0 +1,21 @@
+# modules/playerbots.conf: the isekai premise's layer over conf/playerbots.overrides
+# Hand-written, not generated: conf-overrides.py never writes into conf/isekai/, so notes here survive.
+# ops/scripts/conf-apply.py lays it over the base when site/site.env has PREMISE=isekai. # lines are skipped.
+#
+# Everyone woke up a few days ago at the very start of the road, and a person, once they exist, is never
+# replaced. These keys only decide how a bot is FIRST made: bots that already exist keep the level they
+# have, so an isekai realm wants a fresh bot population.
+
+# Every new random bot starts at RandombotStartingLevel instead of a random level between Min and Max.
+AiPlayerbot.DisableRandomLevels = 1
+AiPlayerbot.RandombotStartingLevel = 1
+# Mode 1: every random bot keeps its level, bags, quests, reputation and talents, and scheduled
+# randomization never rerolls it. A reroll would erase a person. Mode 1 also overrides LevelBrackets and
+# ResetBotLevel while on; both are switched off below anyway so the intent reads plainly.
+AiPlayerbot.PersistentProgression = 1
+# Mode 2 only (raising an anchored bot towards its human); nobody is raised here: they earn every level.
+AiPlayerbot.PersistentProgression.FollowGap = 0
+# Brackets move bots between levels to hold a distribution; that is exactly what must not happen.
+AiPlayerbot.LevelBrackets.Enabled = 0
+# Already the .dist's default (0); restated so a later base change cannot switch level resets on here.
+AiPlayerbot.ResetBotLevel.Enabled = 0

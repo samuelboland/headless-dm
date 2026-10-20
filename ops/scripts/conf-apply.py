@@ -3,7 +3,9 @@
 
     python3 ops/scripts/conf-apply.py [--etc <dir>] [--only worldserver,playerbots] [--dry-run]
 
-For each conf/<name>.overrides:
+For each conf/<name>.overrides -- and, when site/site.env sets PREMISE (services/common/premise.py), the
+premise's own conf/<premise>/<name>.overrides laid over it: the same key takes the premise's value, a key
+the base does not set is added, and a premise file with no base file is applied on its own:
 
   * if the live <name>.conf is missing, start from the installed <name>.conf.dist;
   * replace each key's line in place, or append it if the .dist has never heard of it -- our own modules
@@ -14,6 +16,9 @@ For each conf/<name>.overrides:
     the operator's choice and is left alone;
   * fill ${PLACEHOLDERS} from site/site.env and site/secrets.env, and rebuild the database strings and
     tokens that conf-overrides.py wrote as ${REDACTED};
+  * put back to the .dist's value any key that some premise layer sets but the active layers do not. A
+    realm switched from isekai back to native would otherwise keep, say, Roleplay.UseRaceVoice = 0 for
+    ever, because the base never mentions that key and so nothing would ever write it again;
   * back the live file up first, beside it, with a timestamp.
 
 **It refuses to write a file that still contains a ${...} it could not resolve.** A half-substituted
@@ -32,7 +37,7 @@ import sys
 
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__)))), "services"))
-from common import site  # noqa: E402
+from common import premise, site  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 LINE = re.compile(r"^\s*([A-Za-z0-9_.]+)\s*=\s*(.*?)\s*$")
@@ -81,8 +86,60 @@ def resolve(key, value):
     return None if PLACEHOLDER.search(filled) else filled
 
 
-def apply_file(overrides, etc, dry):
-    name = os.path.basename(overrides)[: -len(".overrides")]
+# Premises that carry their own layer, as conf/<premise>/<name>.overrides. Native is the base itself.
+PREMISE_LAYERS = (premise.ISEKAI,)
+
+
+def layers(name, which):
+    """The overrides files for one conf, lowest first, as (label, path): the base, then the premise's."""
+    out = [("base", os.path.join(REPO, "conf", name + ".overrides"))]
+    if which in PREMISE_LAYERS:
+        out.append((which, os.path.join(REPO, "conf", which, name + ".overrides")))
+    return [(label, path) for label, path in out if os.path.exists(path)]
+
+
+def read_layer(path):
+    """(key, raw value) for each setting line of one overrides file, in order. `#` lines are notes."""
+    for raw in open(path, encoding="utf-8"):
+        if raw.lstrip().startswith("#"):
+            continue
+        m = LINE.match(raw)
+        if m:
+            yield m.group(1), m.group(2)
+
+
+def merged(name, which):
+    """{key: (raw value, label of the layer it came from)}, a later layer winning, in first-seen order."""
+    out = {}
+    for label, path in layers(name, which):
+        for key, value in read_layer(path):
+            out[key] = (value, label)
+    return out
+
+
+def premise_only_keys(name, which):
+    """Keys some OTHER premise's layer sets for this conf, which the active layers may not."""
+    keys = set()
+    for other in PREMISE_LAYERS:
+        path = os.path.join(REPO, "conf", other, name + ".overrides")
+        if other != which and os.path.exists(path):
+            keys.update(k for k, _ in read_layer(path))
+    return keys
+
+
+def dist_values(path):
+    out = {}
+    if os.path.exists(path):
+        for raw in open(path, encoding="utf-8", errors="replace"):
+            m = None if raw.lstrip().startswith("#") else LINE.match(raw)
+            if m and m.group(1) not in out:
+                out[m.group(1)] = m.group(2)
+    return out
+
+
+def apply_file(name, etc, dry, which=premise.NATIVE):
+    """Returns (name, changed, added, errors, origin, restored): origin maps each key a premise layer set to
+    that layer's label; restored lists the keys put back to the .dist because only another premise sets them."""
     # A conf lives either at <etc>/<name>.conf (worldserver, authserver, dbimport) or at
     # <etc>/modules/<name>.conf -- and on a freshly built server ONLY the .dist exists, because the
     # build installs nothing else (src/cmake/macros/ConfigInstall.cmake installs *.conf.dist alone).
@@ -95,23 +152,30 @@ def apply_file(overrides, etc, dry):
     if live is None:
         live = next((p for p in candidates if os.path.exists(p + ".dist")), None)
     if live is None:
-        return name, [], [], [f"neither {name}.conf nor {name}.conf.dist exists in {etc} or {etc}/modules"]
+        return name, [], [], [f"neither {name}.conf nor {name}.conf.dist exists in {etc} or {etc}/modules"], {}, []
     dist = live + ".dist"
 
-    wanted, unresolved = {}, []
-    for raw in open(overrides, encoding="utf-8"):
-        if raw.lstrip().startswith("#"):
-            continue
-        m = LINE.match(raw)
-        if not m:
-            continue
-        got = resolve(m.group(1), m.group(2))
+    wanted, unresolved, origin = {}, [], {}
+    for key, (value, label) in merged(name, which).items():
+        if label != "base":
+            origin[key] = label
+        got = resolve(key, value)
         if got is None:
-            unresolved.append(m.group(1))
+            unresolved.append(key)
         else:
-            wanted[m.group(1)] = got
+            wanted[key] = got
     if unresolved:
-        return name, [], [], [f"cannot resolve: {', '.join(unresolved)} — set them in site/ and run again"]
+        return name, [], [], [f"cannot resolve: {', '.join(unresolved)} — set them in site/ and run again"], {}, []
+
+    # A key only another premise sets goes back to the .dist's value, which is what it was before that
+    # premise ever wrote it: the base records every key it changes, so a key it does not mention is one
+    # it leaves at the .dist. A premise key no .dist has stays as it is -- there is nothing to go back to.
+    restored = []
+    defaults = dist_values(dist)
+    for key in sorted(premise_only_keys(name, which)):
+        if key not in wanted and key in defaults:
+            wanted[key] = defaults[key]
+            restored.append(key)
 
     source = live if os.path.exists(live) else dist
     lines = open(source, encoding="utf-8", errors="replace").read().splitlines(keepends=True)
@@ -169,7 +233,7 @@ def apply_file(overrides, etc, dry):
         with open(live, "w", encoding="utf-8") as fh:
             fh.writelines(lines)
         os.chmod(live, 0o640)
-    return name, changed, added, []
+    return name, changed, added, [], origin, [k for k in restored if k in changed]
 
 
 def main():
@@ -180,22 +244,38 @@ def main():
     args = ap.parse_args()
 
     only = {n.strip() for n in args.only.split(",") if n.strip()}
+    which = premise.current()
+    print(f"premise: {which}" + (f" (conf/{which}/ laid over conf/)" if which in PREMISE_LAYERS else ""))
+    names = {os.path.basename(p)[: -len(".overrides")] for p in glob.glob(os.path.join(REPO, "conf", "*.overrides"))}
+    if which in PREMISE_LAYERS:
+        names |= {os.path.basename(p)[: -len(".overrides")]
+                  for p in glob.glob(os.path.join(REPO, "conf", which, "*.overrides"))}
     reload_keys, restart_keys, problems = [], [], []
-    for path in sorted(glob.glob(os.path.join(REPO, "conf", "*.overrides"))):
-        name = os.path.basename(path)[: -len(".overrides")]
+    for name in sorted(names):
         if only and name not in only:
             continue
-        name, changed, added, errs = apply_file(path, args.etc, args.dry_run)
+        name, changed, added, errs, origin, restored = apply_file(name, args.etc, args.dry_run, which)
         problems += [f"{name}: {e}" for e in errs]
+        if origin:
+            base = {k for k, _ in read_layer(os.path.join(REPO, "conf", name + ".overrides"))} \
+                if os.path.exists(os.path.join(REPO, "conf", name + ".overrides")) else set()
+            over = sum(1 for k in origin if k in base)
+            print(f"{name}: {len(origin)} key(s) from conf/{which}/{name}.overrides "
+                  f"({over} over the base, {len(origin) - over} the base does not set)")
         if added:
             # Each takes the .dist's default, which is what the worldserver was already falling back to
             # when the key was missing -- unless the two disagree, which only the module's code can say.
             print(f"{name}: {len(added)} new .dist key(s) {'would be added' if args.dry_run else 'added'}: "
                   f"{', '.join(added)}")
+        if restored:
+            print(f"{name}: {len(restored)} key(s) only another premise sets "
+                  f"{'would go' if args.dry_run else 'went'} back to the .dist: {', '.join(restored)}")
         if changed:
             print(f"{name}: {len(changed)} key(s) {'would change' if args.dry_run else 'changed'}")
             for k in changed:
                 (reload_keys if RELOADABLE.match(k) else restart_keys).append(f"{name}.{k}")
+                if args.dry_run and k in origin:
+                    print(f"    {k}  [{origin[k]}]")
         elif not errs and not added:
             print(f"{name}: already matches")
 
