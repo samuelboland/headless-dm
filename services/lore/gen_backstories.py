@@ -557,7 +557,10 @@ def check_backstory(text, words_range=(70, 300)):
     # of backstories to begin "You were born", and the gist summarises the backstory, so the
     # sameness was inherited by a field that reaches every prompt. The two checks are reported
     # apart because one message for both made a first-person leak read as a missing "you".
-    first = FIRST_PERSON.search(text)
+    # Under isekai the story shows how a person talks in their own quoted words, which say "I" as anyone does;
+    # only the telling around the quotes has to stay in the second person.
+    told = re.sub(r'["\u201c][^"\u201d]*["\u201d]', " ", text) if premise.is_isekai() else text
+    first = FIRST_PERSON.search(told)
     if first:
         raise ValueError(f"slips into first person ({first.group(0)!r}): {text[:60]!r}")
     if not SECOND_PERSON.search(text):
