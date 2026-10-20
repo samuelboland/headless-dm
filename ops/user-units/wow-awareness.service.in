@@ -1,0 +1,10 @@
+[Unit]
+Description=Awareness: word that this world is a game spreads from arrival to arrival (isekai premise)
+
+[Service]
+ExecStart=/usr/bin/python3 @REPO@/services/lore/awareness.py --interval 600
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=default.target
