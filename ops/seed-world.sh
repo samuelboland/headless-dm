@@ -79,7 +79,9 @@ step_temperaments() {
   # NOT `bash -c "db ... < file"`: db is a shell function from ops/env.sh, and bash -c starts a new
   # shell that inherits no functions. It would fail with "db: command not found" on a real run while
   # looking perfectly fine in --dry-run, which is how it got written that way in the first place.
+  # The isekai premise has its own set: the same keys, written for a modern person a few days in.
   local f="$REPO/sql/characters/temperaments-inworld.sql"
+  [ "${PREMISE:-native}" = "isekai" ] && f="$REPO/sql/characters/temperaments-isekai.sql"
   [ -f "$f" ] || { echo "    missing $f"; return 1; }
   if [ "$DRY" = "1" ]; then
     echo "    would run: db ${DB_CHARACTERS:-acore_characters} < $f"
@@ -95,6 +97,7 @@ step_lore() {
   run python3 "$LORE/gen_backstories.py" traits --era "$ERA" || return 1
   run python3 "$LORE/gen_backstories.py" crafts --era "$ERA" || return 1
   run python3 "$LORE/gen_backstories.py" traits-report --era "$ERA" || true
+  # Under isekai a story is lived as the character levels, so restand only says it has nothing to do.
   run python3 "$LORE/gen_backstories.py" restand --era "$ERA" || return 1
   run python3 "$LORE/gen_backstories.py" project || return 1
   # Same reason as step_temperaments: ra is a function from ops/env.sh, so it is called directly.
@@ -142,7 +145,10 @@ step_services() {
     "" \
     "Then, as that user:" \
     "  systemctl --user enable --now wow-regard wow-chronicler wow-lore-gate wow-market wow-memory-archive" \
-    "  systemctl --user enable --now wow-backup.timer"
+    "  systemctl --user enable --now wow-backup.timer" \
+    "" \
+    "Isekai realms only (PREMISE=isekai, AWARENESS_ENABLED=1 in site/site.env):" \
+    "  systemctl --user enable --now wow-awareness"
 }
 
 step_court() {

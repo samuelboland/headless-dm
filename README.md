@@ -20,6 +20,7 @@ The project site, with screenshots and transcripts: **https://bazola.github.io/h
 | `docs/GUIDE.md` | The setup runbook — 13 phases, each with a gate and a check |
 | `docs/EXTENDING.md` | How to build on it |
 | `docs/accounting.md` | Optional model request accounting and dashboard export |
+| `docs/ISEKAI.md` | The isekai premise: everyone woke up here from the US and Canada a few days ago |
 | `docs/WHATS-NEW.md` | What arrived after the setup runbook: journey stories, quest words, voices, costs, rumours |
 | `services/` | The Python services: lore, regard, chronicler, economy, router, memory |
 | `ops/` | Bootstrap, build, systemd units, database and config tooling |

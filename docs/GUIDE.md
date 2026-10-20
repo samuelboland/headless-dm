@@ -42,6 +42,9 @@ chronicle with your models. No Blizzard data ships either: you bring your own cl
 
 ## Part 0 — For the agent
 
+> **Isekai realm?** If `site/site.env` has `PREMISE=isekai`, read `docs/ISEKAI.md` first. It lists the
+> phases that differ (2, 7, 10.3, 10.4, 10.5 and 11) and what to look for in each sample.
+
 ### 0.1 How the phases work
 
 Every phase has the same parts, in this order:
