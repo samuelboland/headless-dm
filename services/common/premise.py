@@ -207,13 +207,42 @@ def sheet_line(o, name=None):
         return ""
     lb = o["left_behind"]
     here = f" Here people call you {name}." if name else ""
+    y = _yours
     return (f"Back home you were {o['earth_name']}, {o['age']}, "
-            f"{'an' if o['job'][0] in 'aeiouAEIOU' else 'a'} {o['job']} from {o['place_kind']} in {o['home']}. "
-            f"The one you think of most is {lb['relation']}, {lb['name']}, {lb['age']}. "
-            f"When it happened you {o['unfinished']}. You are {'; '.join(o['personality'])}. "
-            f"Faith: {o['faith']}. Back home you loved {o['hobby']}. The way you talk: {o['speech']}. "
-            f"You miss {o['misses']} most, and you are afraid of {o['fear']}. "
-            f"Here you are {o['coping']}, and {o['stance']}." + here)
+            f"{_article(o['job'])} {o['job']} from {o['place_kind']} in {o['home']}. "
+            f"The one you think of most is {y(lb['relation'])}, {lb['name']}, {lb['age']}. "
+            f"When it happened you {y(o['unfinished'])}. You are {'; '.join(y(t) for t in o['personality'])}. "
+            f"Faith: {y(o['faith'])}. Back home you loved {y(o['hobby'])}. The way you talk: {y(o['speech'])}. "
+            f"You miss {y(o['misses'])} most, and you are afraid of {y(o['fear'])}. "
+            f"Here you are {y(o['coping'])}, and {y(o['stance'])}." + here)
+
+
+# The drawn facts (people.py) are written about the person ("misses their phone"), and the sheet says them to the
+# person. These two keep a "they" that is somebody else: whoever is followed, and the glasses.
+_NOT_YOU = ("whoever seems to know what they're doing", "need them now")
+_YOU = [(r"\bthemselves\b", "yourself"), (r"\btheir\b", "your"), (r"\bthey're\b", "you're"),
+        (r"\bthey\b", "you"), (r"\bthem\b", "you")]
+
+
+def _yours(text):
+    held = {}
+    for i, keep in enumerate(_NOT_YOU):
+        if keep in text:
+            held[f"\x00{i}\x00"] = keep
+            text = text.replace(keep, f"\x00{i}\x00")
+    for pattern, word in _YOU:
+        text = re.sub(pattern, word, text)
+    for mark, keep in held.items():
+        text = text.replace(mark, keep)
+    return text
+
+
+def _article(job):
+    """'an HVAC technician', 'a nurse': by the sound, so an initialism goes by its first letter's name."""
+    first = job.split()[0]
+    if first.isupper() and len(first) > 1:
+        return "an" if first[0] in "AEFHILMNORSX" else "a"
+    return "an" if job[0] in "aeiouAEIOU" else "a"
 
 
 # ---------------------------------------------------------------------------
