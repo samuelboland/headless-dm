@@ -90,10 +90,19 @@ Below is a note of what newcomers pick up in their first days. {instruction}
 
 It must be what a newcomer a few days in could have seen, been told by locals, or heard from other newcomers: practical, plain modern English, levels as numbers allowed. Keep every place, person, faction, creature and fact that is true in this time. Rewrite or leave out anything that has not happened yet, anything told as lifelong familiarity with the world's past, and any name of the game, its expansions, servers or interface. 40 to 110 words.
 
-Reply with only the note{keep_clause}. No title, no preamble.
+These come in a later age and do not exist here yet: {forbidden}. Only if the whole note is about one of those, reply exactly DROP; anything else that exists now (auction houses, money, professions, honor, dungeons, group quests) is kept and, where needed, rewritten. Otherwise reply with only the note{keep_clause}. No title, no preamble, and never talk about the note or these instructions.
 
 TITLE: {title}
 NOTE: {content}"""
+
+# A rewrite that talks about itself ("Ragefire Chasm is not in this time... the note must be rewritten") instead of
+# being the note: seen on the isekai realm, where the word filter and the judge both let it through.
+LEAKED = re.compile(r"\b(the note|this note|be rewritten|rewrite|in this time|not true now|newcomer note)\b", re.I)
+
+
+def later_age(e, text):
+    """Whether a note names something from a later age: the era's own names, not the isekai word list."""
+    return bool(eras.get(e["name"])["meta"].search(text))
 
 
 def get_era(name):
@@ -179,6 +188,7 @@ def revise_entry(lane, attempt, e, judge, entry, results, key, review_lock):
     isekai = premise.is_isekai()
     prompt = (ISEKAI_REVISE_PROMPT if isekai else REVISE_PROMPT).format(
         setting=premise.setting(e) if isekai else e["setting"], title=entry.get("title", ""), content=entry["content"],
+        forbidden=e.get("judge_forbidden", ""),
         instruction=("It contains things that are not true in this time, so it must be rewritten." if forced else
                      "If everything in it is already true in this time, reply exactly KEEP."),
         keep_clause="" if forced else ", or KEEP")
@@ -189,8 +199,17 @@ def revise_entry(lane, attempt, e, judge, entry, results, key, review_lock):
             "stage": "revise_entry",
             "route": "batch",
         })
+    if isekai and out.strip().upper().startswith("DROP"):
+        # The model's DROP is taken only when the note itself names a later age (the era's word filter says so):
+        # Haiku dropped auction houses, keys and quest givers when left to judge "does not exist yet" alone.
+        if later_age(e, entry["content"]):
+            results[key] = None    # revise() leaves the entry out
+            return "dropped"
+        raise ValueError("DROP for a note that names nothing from a later age")
     keep = not forced and out.strip().upper().startswith("KEEP")
     text = entry["content"] if keep else re.sub(r"\s+", " ", out).strip()
+    if isekai and LEAKED.search(text):   # a kept entry too: an earlier pass may have written the leak
+        raise ValueError(f"talks about the note instead of being it: {LEAKED.search(text).group(0)!r}")
     if not keep and len(text) < 60:
         raise ValueError(f"short reply: {out[:80]!r}")
     bad = e["meta"].search(text)
@@ -222,13 +241,30 @@ def revise(args):
             pool.submit("rag", 1, lambda lane, attempt, entry=entry, key=key:
                         revise_entry(lane, attempt, e, judge, entry, results, key, review_lock), key)
     failures = pool.run()
+    isekai = premise.is_isekai()
+    if isekai:
+        # Under isekai an entry that never passed is left out when it names a later age (Ulduar, the Borean
+        # Tundra): it has no business in a newcomer's first days. Anything else is left as it was.
+        by_key = {f"{name}:{entry['id']}": entry for name, entries in files.items() for entry in entries}
+        for j in failures:
+            if later_age(e, by_key[j["label"]]["content"]):
+                results[j["label"]] = None
     for name, entries in files.items():
-        updated = [{**entry, "content": results.get(f"{name}:{entry['id']}", entry["content"])} for entry in entries]
+        if isekai:
+            updated = [{**entry, "content": results.get(f"{name}:{entry['id']}", entry["content"])}
+                       for entry in entries if results.get(f"{name}:{entry['id']}", "") is not None]
+        else:
+            updated = [{**entry, "content": results.get(f"{name}:{entry['id']}", entry["content"])} for entry in entries]
         tmp = os.path.join(DST, name + ".tmp")
         json.dump(updated, open(tmp, "w"), indent=2, ensure_ascii=False)
         os.replace(tmp, os.path.join(DST, name))
     for j in failures:
-        print(f"FAILED (left unchanged) {j['label']}: {' | '.join(j['errors'])}", flush=True)
+        how = "left out" if isekai and results.get(j["label"], "") is None else "left unchanged"
+        print(f"FAILED ({how}) {j['label']}: {' | '.join(j['errors'])}", flush=True)
+    if isekai:
+        dropped = sum(1 for v in results.values() if v is None)
+        print(f"done: {len(results)} entries vetted for era {e['name']}, {dropped} left out", flush=True)
+        return 0
     print(f"done: {len(results)} entries vetted for era {e['name']}, {len(failures)} failed", flush=True)
     return 1 if failures else 0
 
