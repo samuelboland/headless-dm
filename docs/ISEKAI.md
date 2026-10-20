@@ -170,5 +170,9 @@ Kill switches for the spreading service: `AWARENESS_ENABLED=0`, `systemctl --use
   will find names it cannot place, and skips them.
 - **The memory writer drops a note that repeats four words of the system prompt,** so a note like "came back to
   their body" can be lost. The log says "echoes the prompt" when it happens.
+- **Alts written by the `alts` command get a drawn origin,** so their stored game knowledge can say they never
+  played, while the spreading service treats every character on the player's account as knowing. Alts written
+  through the lore gate are stored as knowing.
+- **The main's real name and home live only in its sheet text.** The sheet's table has no origin column.
 - **Nothing here has been run against a live realm yet.** Every piece was checked with stand-ins for the database
   and the models.
