@@ -188,7 +188,13 @@ def lore(args):
                 data = json.loads(m.group(0)) if m else {}
                 feels = max(-40, min(40, int(data.get("feels"))))
                 thought = re.sub(r"\s+", " ", str(data.get("thought") or "")).strip().strip('"').translate(rg.ASCII_PUNCT)
-                if not thought.lower().startswith("you") or len(thought.split()) > 40 or e["meta"].search(thought):
+                # Native: a thought opens on "you". Under isekai the model as often opens on the other person
+                # ("Iwi brought you in when you had nothing"), which is still this person's feeling in the second
+                # person; only a first-person line is wrong.
+                second = (thought.lower().startswith("you") if not premise.is_isekai() else
+                          bool(re.search(r"\byou(r)?\b", thought, re.I))
+                          and not re.search(r"\b(I|me|my|mine|myself)\b", thought))
+                if not second or len(thought.split()) > 40 or e["meta"].search(thought):
                     raise ValueError(f"unusable thought {thought[:60]!r}")
                 return job, feels, thought
             except (RuntimeError, ValueError, TypeError) as ex:
