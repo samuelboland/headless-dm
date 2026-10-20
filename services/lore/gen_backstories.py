@@ -4,6 +4,12 @@
 Standing rule: characters are people living in Azeroth, never game players.
 Everything is written for one era (era.py), which is "now" for the people in it.
 
+Under PREMISE=isekai (services/common/premise.py) the rule changes: every
+character is an ordinary person from the United States or Canada who woke up
+in Azeroth a few days ago, at the start of the road. The era still decides
+what has happened in Azeroth. Every prompt and check below has an isekai form,
+chosen by premise.is_isekai(); with PREMISE unset nothing here changes.
+
   generate  guild histories and member backstories as one pipeline: a guild's
             members are queued the moment its history is stored. --unguilded
             also queues bot characters outside any guild, behind the members,
@@ -71,6 +77,7 @@ LORE_DIR = os.path.dirname(os.path.abspath(__file__))
 # it would put /opt/wow on the path and `common` would not be there (plan 23 W1).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from common import site  # noqa: E402
+from common import premise  # noqa: E402
 
 RACES = {1: "Human", 2: "Orc", 3: "Dwarf", 4: "Night Elf", 5: "Forsaken", 6: "Tauren",
          7: "Gnome", 8: "Troll", 10: "Blood Elf", 11: "Draenei"}
@@ -136,7 +143,10 @@ def ensure_schema():
     have = {r[0] for r in sql("SELECT column_name FROM information_schema.columns WHERE table_schema = DATABASE() "
                               "AND table_name = 'lore_character'")}
     # Plan 33: the working life. LIFE_COLUMNS is defined far below, beside the code that writes it.
-    for column, ddl in TRAIT_COLUMNS + LIFE_COLUMNS:
+    # The isekai premise: who each person was before, and what they know of the game. Added under either
+    # premise, so a realm can switch without a schema step; under native they keep their defaults and are read
+    # by nothing.
+    for column, ddl in TRAIT_COLUMNS + LIFE_COLUMNS + PREMISE_COLUMNS:
         if column not in have:
             sql(f"ALTER TABLE lore_character ADD COLUMN {column} {ddl}", fetch=False)
     # Plan 28: when a person wrote the text, their own words are kept beside the shaped prose, so it can be
@@ -147,6 +157,75 @@ def ensure_schema():
                    f"AND table_name = '{table}' AND column_name = 'source'"):
             sql(f"ALTER TABLE {table} ADD COLUMN source TEXT NULL "
                 f"COMMENT 'The player''s own words, when a person wrote this (plan 28)'", fetch=False)
+
+
+PREMISE_COLUMNS = [
+    ("premise", "VARCHAR(16) NOT NULL DEFAULT 'native' COMMENT 'premise.py premise the text was written for'"),
+    ("origin", "JSON NULL COMMENT 'isekai: premise.origin() as drawn, plus the earth_name the model chose'"),
+    ("knows_game", "TINYINT NOT NULL DEFAULT 0 COMMENT 'isekai: 0 no idea, 1 told by someone, 2 played it'"),
+    ("knows_game_from", "INT UNSIGNED NULL COMMENT 'isekai: guid of the character who told them (knows_game 1)'"),
+]
+
+
+def premise_guard():
+    """Stop when lore_character holds rows written for the other premise, the way rows of another era stop
+    `generate`. A native story projected under isekai (or the reverse) would tell a person a life they never
+    had, and no check downstream would notice. A table that predates the column holds only native rows."""
+    if not sql("SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() "
+               "AND table_name = 'lore_character' AND column_name = 'premise'"):
+        if premise.is_isekai() and int(sql("SELECT COUNT(*) FROM lore_character")[0][0]):
+            sys.exit("lore_character holds stories written before the isekai premise; run `reset` first")
+        return
+    other = int(sql(f"SELECT COUNT(*) FROM lore_character WHERE premise <> {q(premise.current())}")[0][0])
+    if other:
+        sys.exit(f"{other} lore rows belong to another premise than {premise.current()!r}; run `reset` first")
+
+
+def get_era(name):
+    """era.get, with the isekai premise's out-of-world patterns in place of the era's.
+
+    Native is untouched: the era as era.py defines it. Under isekai the era's META regex is wrong in both
+    directions. It rejects the words a person from home uses without thinking (a game, a player, a server, a
+    level), and it does not see the one thing that breaks this premise and not the native one: a life in
+    Azeroth longer than a few days. So "meta" becomes ISEKAI_META plus the era's later-age names (for anyone
+    who never played), and "meta_gamer" is ISEKAI_META alone: a person who played may name later chapters as
+    things the game had, and only the judge can tell "in the game" from "here".
+    """
+    e = eras.get(name)
+    if not premise.is_isekai():
+        return e
+    e = dict(e, premise=premise.ISEKAI)
+    extra = ("|" + e["meta_extra"]) if e["meta_extra"] else ""
+    e["meta"] = re.compile(r"\b(" + ISEKAI_META + extra + r")\b", re.I)
+    e["meta_gamer"] = re.compile(r"\b(" + ISEKAI_META + r")\b", re.I)
+    return e
+
+
+def meta_for(e, knows_game=0):
+    """The out-of-world pattern for one person: looser for someone who played the game (see get_era)."""
+    if knows_game >= 2 and "meta_gamer" in e:
+        return e["meta_gamer"]
+    return e["meta"]
+
+
+_knows_cache = {}
+
+
+def knows_of(guid):
+    """knows_game for one character, read once per run for the whole table. Native: always 0."""
+    if not premise.is_isekai():
+        return 0
+    if not _knows_cache:
+        _knows_cache.update({int(r[0]): int(r[1]) for r in sql("SELECT guid, knows_game FROM lore_character")})
+        _knows_cache.setdefault(-1, 0)   # marks the cache as read on an empty table
+    return _knows_cache.get(int(guid), 0)
+
+
+def judge_prompt(e, text, knows_game=0):
+    """The judge's question for this premise: era.py's for native, premise.py's for isekai."""
+    if premise.is_isekai():
+        return premise.judge_prompt(e, text, knows_game)
+    return eras.judge_prompt(e, text)
 
 
 def era_filter(e, alias="c"):
@@ -193,6 +272,72 @@ Temperament: {temperament}
 {guild_block}
 {keep_block}Write 170 to 210 words in the second person, speaking to them as "you" and "your". Open somewhere that belongs to this person alone, and vary the shape of the first sentence: it must not always be "You" followed by a verb, and the opening must not always be a scar, a habit, a kept object or a remembered smell. Never begin with "You were born", "You still", "You return", "You keep", "You trace", "Your left", "Your fingers", "Your knuckles" or "The scar". Cover: where you come from and your family; what set you on the path of a {cls}; one event in the wars of recent years that marked you; {guild_reason}; one thing you want and one thing you fear; one thing you love in life; and one good memory from before the wars. {relation_line} End with one sentence on how you speak. Keep it true to {race} culture and to the history of Azeroth. Don't use the names {overused}; give invented people names of their own. Plain prose only: no title, no lists, no quotes around it."""
 
+# The isekai forms of the two prompts above. Where the native ones forbid the world outside Azeroth, these are
+# about it: the person had a whole life before, and a few days here. What carries over is everything the
+# native prompts learned the hard way -- the varied openings, the overused names, the invented people.
+ISEKAI_GUILD_PROMPT = """{setting}{limits}
+
+Write how a {faction} band of these arrivals called "{name}" came together. It formed in the last few days, out of people who woke up near each other and stuck together. Treat the name as given: it may be a joke someone made, a reference from back home, something a local misheard, or the first thing anyone suggested. Everything about it is days old: no founding generations ago, no famous victories, no reputation beyond the few people who have met them.
+
+Its members, with the rank they gave each other:
+{roster}{others}
+
+Ranks, highest first: {ranks}.
+
+Reply with ONLY a JSON object, no markdown fences:
+{{
+  "history": "130 to 200 words: where and how these people found each other in the last few days, who pulled them together and why, what they are trying to do (get home, find their people, understand what happened, or just stay alive), one thing that went wrong or right in these first days, and {guild_now}",
+  "charter": "the band's description as someone would post it for other arrivals to find, under 450 characters",
+  "motto": "the leaders' latest word to the band, under 110 characters",
+  "member_roles": {{"<each member named above, exactly as given>": "one sentence on their place in the band so far"}}
+}}"""
+
+ISEKAI_CHAR_PROMPT = """{setting}{limits}
+
+Write the story of an ordinary person from the real world who is now {name}, a {gender} {race} {cls} of the {faction}.
+{origin_line}
+Temperament: {temperament}
+{guild_block}
+{keep_block}First, choose their real name from back home: an ordinary first and last name that fits someone of their age and background from {home}. Not a famous person, not anyone real and identifiable, and none of {overused}. "{name}" is what they have gone by here, what the people of this world call them; the story uses both names.
+
+Then write 170 to 210 words in the second person, speaking to them as "you" and "your". Open somewhere in the life before that belongs to this person alone, and vary the shape of the first sentence: it must not always be "You" followed by a verb, it must not open on waking up here, and it must not open on a scar, a habit, a kept object or a remembered smell. Never begin with "You were born", "You still", "You return", "You keep", "You trace", "Your left", "Your fingers", "Your knuckles" or "The scar". Cover: the life before, your work and the people you left behind, named; the moment it happened, when you were {moment}; waking up as a {gender} {race} {cls}, in a body that is not yours and with a {cls}'s reflexes you do not understand yet, in {start}; the first few days{death_hint}; {guild_reason}; one thing you want most and one thing you fear. {knowledge_task} {relation_line} You are a few days in and at the very start of the road: untrained, with no great deeds, no battles of note and no history in this world. End with one sentence on how you talk: your real accent and way of speaking from home. Give invented people from home ordinary American or Canadian names that fit their age; people born in this world have its names. Plain prose only: no title, no lists.
+
+Reply with ONLY a JSON object, no markdown fences: {{"earth_name": "First Last", "backstory": "the story"}}"""
+
+# Where each people's newcomers wake: the starting lands of the game, and the nearest town they walk to first.
+ISEKAI_START = {
+    1: "Northshire Abbey in Elwynn Forest, with Goldshire down the road and Stormwind beyond it",
+    2: "the Valley of Trials in Durotar, with Razor Hill and Orgrimmar to the north",
+    3: "Coldridge Valley in Dun Morogh, with Kharanos and Ironforge up the pass",
+    4: "Shadowglen on Teldrassil, with Dolanaar and Darnassus beyond it",
+    5: "a crypt at Deathknell in Tirisfal Glades, with Brill and the Undercity down the road",
+    6: "Camp Narache in Mulgore, with Bloodhoof Village and Thunder Bluff beyond it",
+    7: "Coldridge Valley in Dun Morogh, among the gnomes who fled Gnomeregan, with Kharanos and Ironforge up the pass",
+    8: "the Valley of Trials in Durotar, with Sen'jin Village and Razor Hill nearby",
+    10: "Sunstrider Isle in Eversong Woods, with Silvermoon beyond it",
+    11: "Ammen Vale on Azuremyst Isle, with Azure Watch and the Exodar beyond it",
+}
+
+KNOWS_TASK = {
+    0: ("You have never played World of Warcraft and have no idea where you are: you do not name the game, and "
+        "nothing in your story says this world comes from one."),
+    1: ("Another arrival told you this world is a computer game called World of Warcraft; say what you made of "
+        "that, and whether you believe it."),
+    2: ("You played World of Warcraft back home: say the moment you recognised where you are, and how that felt. "
+        "Anything you know of the game's later chapters is game knowledge only; none of it has happened here."),
+}
+
+
+def origin_of(c):
+    """The drawn origin, or the stored one when the story is already written (it carries the earth name)."""
+    o = c.get("origin")
+    if isinstance(o, str) and o.strip() and o.strip() != "NULL":
+        try:
+            o = json.loads(o)
+        except ValueError:
+            o = None
+    return o if isinstance(o, dict) and o else premise.origin(c["guid"])
+
 
 def temperaments():
     rows = sql("SELECT `key`, prompt FROM mod_ollama_chat_personality_templates "
@@ -224,11 +369,63 @@ def history_roster(members, cap=HISTORY_ROSTER):
 
 
 def describe(m, e):
+    if premise.is_isekai():
+        # Everyone in an isekai band is days in; the level a bot happens to stand at says nothing of them yet.
+        return (f"- {m['name']}: {'female' if m['gender'] else 'male'} {RACES.get(m['race'], 'unknown')} "
+                f"{CLASSES.get(m['cls'], 'adventurer')}; rank {m['rname']}")
     return (f"- {m['name']}: {'female' if m['gender'] else 'male'} {RACES.get(m['race'], 'unknown')} "
             f"{CLASSES.get(m['cls'], 'adventurer')}, {eras.standing(m['level'], e)}; rank {m['rname']}")
 
 
+def isekai_char_prompt(c, temper, guild, e, bond=None, main_name=None, concept=None, main_sheet=None, keep=()):
+    """char_prompt under the isekai premise. Same arguments, same blocks for a company, a player's concept
+    and an alt's bond; the story it asks for is a life from home and a few days here."""
+    faction = "Horde" if c["race"] in HORDE else "Alliance"
+    race, cls = RACES.get(c["race"], "unknown"), CLASSES.get(c["cls"], "adventurer")
+    o = origin_of(c)
+    if guild:
+        mates = [m for m in guild["members"] if m["guid"] != c["guid"]]
+        picks = random.sample(mates, min(3, len(mates)))
+        role = guild["roles"].get(c["name"], "")
+        guild_block = (f"\nYou fell in with a band of other arrivals who call themselves \"{guild['name']}\", and "
+                       f"they gave you the rank {c['rname']}. {role}\nHow the band came together:\n"
+                       f"{guild['history']}\nSome of the others in it:\n"
+                       + "\n".join(describe(m, e) for m in picks) + "\n")
+        guild_reason = "how you fell in with the band and what it means to you"
+        relation_line = ("Name one of the others above and say what is between you." if picks else
+                         "Name one other arrival you have met here (invented, not famous) and what is between you.")
+    else:
+        guild_block = ""
+        guild_reason = "why you are still on your own, or who you have run into"
+        relation_line = "Name one other arrival you have met here (invented, not famous) and what is between you."
+    if concept:
+        guild_block += (f"\nWhat the player says is true of {c['name']}, every word of which must survive in "
+                        f"what you write:\n{concept.strip()}\n")
+    if bond:
+        if main_sheet:
+            guild_block += (f"\nWhat is known of {main_name}, none of which you may contradict, and to whose "
+                            f"people, places and losses you must keep:\n{main_sheet.strip()}\n")
+        guild_block += f"\nThe one who matters most to you is {main_name}. What is between you:\n{bond}\n"
+        relation_line = (f"Say what is between you and {main_name}, as it is written above. Invent no deeds for "
+                         f"{main_name}, and give them no words or feelings that are not there.")
+    keep_block = ("These exact words must appear in what you write: " + ", ".join(keep) + ".\n\n") if keep else ""
+    # Not everyone has died yet. Drawn from the guid, so a retry asks the same question of the same person.
+    died = premise.rng_for(c["guid"], "died").random() < 0.4
+    death_hint = (", including the first time you died and walked back to your body as a ghost" if died else
+                  ", and how close you have come to dying")
+    return ISEKAI_CHAR_PROMPT.format(
+        keep_block=keep_block, setting=premise.setting(e), limits=e["limits"], name=c["name"],
+        gender="female" if c["gender"] else "male", race=race, cls=cls, faction=faction,
+        origin_line=premise.origin_line(o), temperament=temper[1], guild_block=guild_block,
+        home=f"{o['home']}, {o['country']}", overused=", ".join(OVERUSED_NAMES), moment=o["moment"],
+        start=ISEKAI_START.get(c["race"], "their people's homeland"), death_hint=death_hint,
+        guild_reason=guild_reason, knowledge_task=KNOWS_TASK.get(o["knows_game"], KNOWS_TASK[0]),
+        relation_line=relation_line)
+
+
 def char_prompt(c, temper, guild, e, bond=None, main_name=None, concept=None, main_sheet=None, keep=()):
+    if premise.is_isekai():
+        return isekai_char_prompt(c, temper, guild, e, bond, main_name, concept, main_sheet, keep)
     faction = "Horde" if c["race"] in HORDE else "Alliance"
     race, cls = RACES.get(c["race"], "unknown"), CLASSES.get(c["cls"], "adventurer")
     if guild:
@@ -277,14 +474,16 @@ def char_prompt(c, temper, guild, e, bond=None, main_name=None, concept=None, ma
 _review_lock = threading.Lock()
 
 
-def vet(text, e, judge, attempt, label):
-    """Raise to retry; on the last attempt a judge flag is recorded for review instead."""
-    bad = e["meta"].search(text)
+def vet(text, e, judge, attempt, label, knows_game=0):
+    """Raise to retry; on the last attempt a judge flag is recorded for review instead.
+
+    knows_game matters only under the isekai premise: what a person may say of the game (get_era)."""
+    bad = meta_for(e, knows_game).search(text)
     if bad:
         raise ValueError(f"out-of-world term: {bad.group(0)!r}")
     if not judge:
         return
-    evidence = judge.check(eras.judge_prompt(e, text))
+    evidence = judge.check(judge_prompt(e, text, knows_game))
     if not evidence:
         return
     if attempt < fleet.MAX_ATTEMPTS:
@@ -315,6 +514,53 @@ def check_backstory(text, words_range=(70, 300)):
     return text
 
 
+EARTH_NAME_RE = re.compile(r"[A-Z][a-zA-Z'\-]+(?: [A-Z][a-zA-Z'\-]+){1,2}")
+
+
+def check_earth_name(earth, c, text):
+    """The real name an isekai person chose from home: an ordinary first and last name, said in the story.
+
+    The story has to carry both names, because the bio is read by a model that must answer to either: the
+    people of this world call them by the character's name, the arrivals who knew them by the other.
+    """
+    earth = re.sub(r"\s+", " ", str(earth or "").translate(ASCII_PUNCT)).strip().strip('"')
+    if not EARTH_NAME_RE.fullmatch(earth):
+        raise ValueError(f"earth name is not a first and last name: {earth!r}")
+    first = earth.split()[0]
+    if first.lower() == c["name"].lower() or first in OVERUSED_NAMES:
+        raise ValueError(f"earth name {earth!r} repeats the character's name or an overused one")
+    if not re.search(rf"\b{re.escape(first)}\b", text):
+        raise ValueError(f"story never says the earth name {first!r}")
+    if not re.search(rf"\b{re.escape(c['name'])}\b", text, re.I):
+        raise ValueError(f"story never says the name {c['name']!r} they go by here")
+    return earth
+
+
+def ask_backstory(lane, c, prompt, max_tokens, context, words_range=(70, 300)):
+    """One backstory call, checked. Returns (text, origin); origin is None under native.
+
+    Native is exactly the old call: plain prose in, check_backstory out. Under isekai the reply is JSON, so the
+    real name the model chose comes back apart from the story and can be stored in lore_character.origin.
+    """
+    if not premise.is_isekai():
+        return check_backstory(lane.chat([{"role": "user", "content": prompt}], max_tokens, context=context),
+                               words_range), None
+    # The JSON wrapper and the earth name cost a few dozen tokens on top of the story.
+    data = extract_json(lane.chat([{"role": "user", "content": prompt}], max_tokens + 150, context=context))
+    text = check_backstory(str(data.get("backstory") or ""), words_range)
+    o = dict(origin_of(c))
+    o["earth_name"] = check_earth_name(data.get("earth_name"), c, text)
+    return text, o
+
+
+def origin_columns(o):
+    """The INSERT columns and values an isekai story adds; empty under native, so its INSERT is unchanged."""
+    if o is None:
+        return "", ""
+    return (", premise, origin, knows_game",
+            f", {q(premise.ISEKAI)}, {q(json.dumps(o, ensure_ascii=False))}, {int(o.get('knows_game', 0))}")
+
+
 # ---------------------------------------------------------------------------
 # jobs
 
@@ -326,11 +572,18 @@ def gen_guild(lane, attempt, e, judge, guildid, name):
     ranks = [r[0] for r in sql(f"SELECT rname FROM guild_rank WHERE guildid = {guildid} ORDER BY rid")]
     named = history_roster(members)
     others = len(members) - len(named)
-    prompt = GUILD_PROMPT.format(setting=e["setting"], faction=faction, name=name,
-                                 roster="\n".join(describe(m, e) for m in named),
-                                 others=(f"\n...and {others} more sworn members, not named here."
-                                         if others else ""),
-                                 ranks=", ".join(ranks), guild_now=e["guild_now"])
+    if premise.is_isekai():
+        prompt = ISEKAI_GUILD_PROMPT.format(setting=premise.setting(e), limits=e["limits"], faction=faction,
+                                            name=name, roster="\n".join(describe(m, e) for m in named),
+                                            others=(f"\n...and {others} more members, not named here."
+                                                    if others else ""),
+                                            ranks=", ".join(ranks), guild_now="what it means to do next")
+    else:
+        prompt = GUILD_PROMPT.format(setting=e["setting"], faction=faction, name=name,
+                                     roster="\n".join(describe(m, e) for m in named),
+                                     others=(f"\n...and {others} more sworn members, not named here."
+                                             if others else ""),
+                                     ranks=", ".join(ranks), guild_now=e["guild_now"])
     data = extract_json(lane.chat([{"role": "user", "content": prompt}], 1400, temperature=0.85,
         context={
             "purpose": "lore_guild",
@@ -344,7 +597,9 @@ def gen_guild(lane, attempt, e, judge, guildid, name):
     history, charter, motto = data["history"].strip(), data["charter"].strip(), data["motto"].strip()
     names = {m["name"] for m in named}
     roles = {k: v for k, v in data.get("member_roles", {}).items() if isinstance(v, str) and k in names}
-    if len(history.split()) < 120:
+    # The isekai band is days old and asked for 130-200 words, not 180-260: there is less history to tell.
+    shortest = 90 if premise.is_isekai() else 120
+    if len(history.split()) < shortest:
         raise ValueError(f"history too short ({len(history.split())} words)")
     vet(" ".join([history, charter, motto, *roles.values()]), e, judge, attempt, f"guild {guildid} {name}")
     sql("INSERT INTO lore_guild (guildid, history, charter, motto, member_roles, model, era) VALUES "
@@ -354,7 +609,7 @@ def gen_guild(lane, attempt, e, judge, guildid, name):
 
 
 def gen_character(lane, attempt, e, judge, c, temper, guild):
-    text = check_backstory(lane.chat([{"role": "user", "content": char_prompt(c, temper, guild, e)}], 500,
+    text, o = ask_backstory(lane, c, char_prompt(c, temper, guild, e), 500,
         context={
             "purpose": "lore_backstory",
             "source": "lore/gen_backstories.py",
@@ -362,12 +617,13 @@ def gen_character(lane, attempt, e, judge, c, temper, guild):
             "route": "batch",
             "bot": c.get("name"),
             "bot_guid": c.get("guid"),
-        }))
-    vet(text, e, judge, attempt, f"character {c['guid']} {c['name']}")
+        })
+    vet(text, e, judge, attempt, f"character {c['guid']} {c['name']}", (o or {}).get("knows_game", 0))
     gid = str(guild["guildid"]) if guild else "NULL"
-    sql("INSERT INTO lore_character (guid, guildid, temperament, backstory, model, era) VALUES "
+    cols, vals = origin_columns(o)
+    sql(f"INSERT INTO lore_character (guid, guildid, temperament, backstory, model, era{cols}) VALUES "
         f"({c['guid']}, {gid}, {q(temper[0])}, {q(text)}, {q((lane.name + ':' + lane.model)[:64])}, "
-        f"{q(e['name'])})", fetch=False)
+        f"{q(e['name'])}{vals})", fetch=False)
 
 
 # ---------------------------------------------------------------------------
@@ -416,8 +672,20 @@ NAME_BANNED = {
 NAME_POOL_PROMPT = """List {n} {gender} given names that a {culture} of Azeroth might carry, true to how the {culture} people name their children: varied sounds, lengths and first letters.{style} No famous figures from the world's history, and none of: {avoid}. Reply with ONLY a JSON object: {{"names": ["...", "..."]}}"""
 
 
+def isekai_no_pools(cmd):
+    """The name pools are the naming customs of Azeroth's peoples. Under the isekai premise the invented people
+    in a story are mostly from home -- a mother in Tulsa, a shift manager in Mississauga -- and the prompt asks
+    for ordinary American and Canadian names that fit their age, so running a troll's or a tauren's pool over
+    them would rename a Linda into a Zen'tabra. Nothing is changed."""
+    log(f"{cmd}: not used under the isekai premise; invented people from home keep the ordinary names the "
+        "prompts ask for, and Azeroth's name pools would give them a troll's or a tauren's instead")
+    return 0
+
+
 def name_pools(args):
-    e = eras.get(args.era)
+    if premise.is_isekai():
+        return isekai_no_pools("name-pools")
+    e = get_era(args.era)
     taken = {r[0].lower() for r in sql("SELECT name FROM characters")}
     avoid = FAMOUS | NAME_STYLE_EXAMPLES | {n.lower() for n in OVERUSED_NAMES} | {t.lower() for t, _, _ in e["targets"]}
     lane = fleet.prefer_lanes("evo-quality")[0]
@@ -472,7 +740,9 @@ def name_pools(args):
 
 
 def rename_overused(args):
-    e = eras.get(args.era)
+    if premise.is_isekai():
+        return isekai_no_pools("rename-overused")
+    e = get_era(args.era)
     pools = json.load(open(NAMES_FILE))
     fields = ("backstory", "gist", "motivation", "motivation_short")
     rows = sql("SELECT l.guid, c.name, c.race, "
@@ -530,7 +800,9 @@ def repool(args):
     """Rename invented people whose names came from a replaced name pool, in characters of that culture, to names from
     the current pools. Same rules as rename-overused: one character at a time, the same person renamed the same way
     across its texts, and a figure of its guild's history kept (every member knows that person)."""
-    e = eras.get(args.era)
+    if premise.is_isekai():
+        return isekai_no_pools("repool")
+    e = get_era(args.era)
     old_pools, pools = json.load(open(args.old)), json.load(open(NAMES_FILE))
     taken = {r[0] for r in sql("SELECT name FROM characters")}
     fields = ("backstory", "gist", "motivation", "motivation_short")
@@ -620,6 +892,48 @@ The voice wanted, written for someone else (reuse none of it, including the word
 
 Reply with ONLY a JSON object with the keys personality, gist, motivation, motivation_short, motivation_kind, motivation_target. No markdown fences."""
 
+ISEKAI_TRAITS_PROMPT = """{setting}{limits}
+
+This is {name}, a {gender} {race} {cls} of the {faction}: or rather {earth_name}, an ordinary person from home who woke up in that body a few days ago. {origin_line}{guild_line}
+Temperament: {temperament}
+Their story, as told to them:
+{backstory}
+
+Write four things about them, true to the story above: a real person from home, a few days into a body and a world that are not theirs. Every one speaks to them as "you" and "your": never "I", "me" or "my", and never a bare fragment. Keep the names your story uses, both the one from home and the one they go by here; never introduce the names {overused}.
+1. "personality": who you are in any room, at most 35 words and never more than 60: two or three traits, how you carry yourself, how you talk (the way you talked at home), one telling habit, and the one thing you love from the story above - named, or shown in what you notice and reach for. Specific to you, not a type. Don't begin it with "You move like" or "You carry yourself".
+2. "gist": your story in at most 45 words, keeping its names, where you came from and the moment it happened. Do not begin it with "Born", "Raised" or "You were born", and do not open on a birthplace or on waking up here: start from whatever weighs most on you now.
+3. "motivation": what you are living for, 40 to 70 words, built on what your story says you want (don't open with "You live for"). Its kind must be one of these three: {kinds}.{kind_gloss} Say the goal, why it matters to you, what you have done toward it in these few days, and what you would risk. It may be far beyond you today.
+4. "motivation_short": the same motivation in one sentence of at most 20 words. Lead with the thing itself - the goal, the place, the person - rather than with the word "You": never begin with "You seek", "You strive", "You mean", "You aim", "You hunt" or "You want". The sentence must still contain "you" or "your" somewhere after that opening, exactly as the example below does. Move the pronoun out of the opening; do not drop it.
+Also give "motivation_kind" (exactly one of: {kinds}) and "motivation_target": what the motivation is aimed at, as {{"type": "foe" or "person" or "place" or "faction" or "cause", "name": "..."}}. For most arrivals it is a person from your story (someone at home, or someone lost here), your home itself (a place), or a cause such as "the way home". A foe or faction is not needed; if you choose one, it must be one of these, or someone named in your story: {targets}.
+
+The voice wanted, written for someone else (reuse none of it, including the words it opens on): {{"personality": "You are blunt and patient, keep your back to walls, and answer questions with questions. You still pat your pocket for a phone that is not there.", "motivation_short": "Every copper you earn goes to finding the one person here who has heard of a way back."}}
+
+Reply with ONLY a JSON object with the keys personality, gist, motivation, motivation_short, motivation_kind, motivation_target. No markdown fences."""
+
+# The motivations an arrival has that a native never could. One is always offered beside two of era.py's kinds,
+# so "get home", "find my kids" and "figure out what this is" are common without crowding out the rest: a
+# person who decides this is their second chance, or who wants revenge on the thing that killed them twice, is
+# still a person worth writing. Each fits the 16 characters of motivation_kind.
+ISEKAI_KINDS = {
+    "homecoming": "homecoming means getting back to your own world and your own life",
+    "reunion": "reunion means finding your people: someone at home, or someone you lost in all this",
+    "understanding": "understanding means working out what happened to you all, and why",
+}
+ISEKAI_KIND_CUES = {
+    "reunion": ("kids", "son", "daughter", "wife", "husband", "partner", "baby", "mom", "dad", "sister", "brother"),
+    "understanding": ("why", "how", "explain", "game", "science", "answer"),
+    "homecoming": ("home", "back", "house", "job", "shift"),
+}
+
+
+def isekai_kinds(race, cls, backstory, rng):
+    """Three kinds: one of ISEKAI_KINDS, weighted by the story, and two of era.py's, with its race and class bias."""
+    text = backstory.lower()
+    weights = [2.0 + sum(1.0 for cue in ISEKAI_KIND_CUES[k] if re.search(rf"\b{cue}\b", text))
+               for k in ISEKAI_KINDS]
+    first = rng.choices(list(ISEKAI_KINDS), weights=weights, k=1)[0]
+    return [first] + eras.draw_kinds(race, cls, backstory, rng, n=2)
+
 
 def _flat(col):
     # mysql --batch --raw prints newlines and tabs raw; keep one row per line.
@@ -635,7 +949,7 @@ HISTORY_SQL = """SUBSTRING_INDEX(lg.history, ' ', 60)"""
 def trait_rows(e, where="l.personality IS NULL", extra=""):
     rows = sql("SELECT l.guid, c.name, c.race, c.class, c.gender, c.level, "
                f"{_flat('t.prompt')}, {_flat('l.backstory')}, {_flat('g.name')}, {_flat('gr.rname')}, "
-               f"{_flat(ROLE_SQL)}, {_flat(HISTORY_SQL)} "
+               f"{_flat(ROLE_SQL)}, {_flat(HISTORY_SQL)}{origin_sql()} "
                "FROM lore_character l JOIN characters c ON c.guid = l.guid "
                "LEFT JOIN mod_ollama_chat_personality_templates t ON t.`key` = l.temperament "
                "LEFT JOIN guild_member m ON m.guid = l.guid LEFT JOIN guild g ON g.guildid = m.guildid "
@@ -643,7 +957,20 @@ def trait_rows(e, where="l.personality IS NULL", extra=""):
                "LEFT JOIN lore_guild lg ON lg.guildid = m.guildid "
                f"WHERE l.era = {q(e['name'])} AND {where} AND {era_filter(e)} {extra}")
     return [dict(guid=int(r[0]), name=r[1], race=int(r[2]), cls=int(r[3]), gender=int(r[4]), level=int(r[5]),
-                 temperament=r[6], backstory=r[7], guild=r[8], rank=r[9], role=r[10], history=r[11]) for r in rows]
+                 temperament=r[6], backstory=r[7], guild=r[8], rank=r[9], role=r[10], history=r[11],
+                 **origin_fields(r, 12)) for r in rows]
+
+
+def origin_sql():
+    """The two isekai columns a row reader appends, or nothing under native (its query stays as it was)."""
+    return f", {_flat('l.origin')}, l.knows_game" if premise.is_isekai() else ""
+
+
+def origin_fields(r, at):
+    """What origin_sql's columns read back as, from position `at` of a row; nothing under native."""
+    if not premise.is_isekai():
+        return {}
+    return dict(origin=r[at], knows_game=int(r[at + 1] or 0))
 
 
 # Caps re-tuned after the longer backstory (plan 37 §12) inflated every field that summarises it.
@@ -691,18 +1018,38 @@ def _words(text):
 
 def build_traits(lane, c, e, judge, rng):
     """One call. Returns (data, kinds, problems, judge_flag); nothing is stored here."""
-    kinds = eras.draw_kinds(c["race"], c["cls"], c["backstory"], rng)
+    isekai = premise.is_isekai()
+    kinds = (isekai_kinds if isekai else eras.draw_kinds)(c["race"], c["cls"], c["backstory"], rng)
     guild_line = ""
     if c["guild"]:
-        guild_line = f" Sworn to the company \"{c['guild']}\" with the rank {c['rank']}. {c['role']}"
-        if c["history"]:
-            guild_line += f" The company's story begins: {c['history']}..."
-    prompt = TRAITS_PROMPT.format(
-        setting=e["setting"], limits=e["limits"], name=c["name"], gender="female" if c["gender"] else "male",
-        race=RACES.get(c["race"], "unknown"), cls=CLASSES.get(c["cls"], "wanderer"),
-        faction="Horde" if c["race"] in HORDE else "Alliance", standing=eras.standing(c["level"], e),
-        guild_line=guild_line, temperament=c["temperament"], backstory=c["backstory"],
-        kinds=", ".join(kinds), targets=", ".join(t for t, _, _ in e["targets"]), overused=", ".join(OVERUSED_NAMES))
+        if isekai:
+            guild_line = f" Fell in with a band of arrivals called \"{c['guild']}\", rank {c['rank']}. {c['role']}"
+            if c["history"]:
+                guild_line += f" How the band came together begins: {c['history']}..."
+        else:
+            guild_line = f" Sworn to the company \"{c['guild']}\" with the rank {c['rank']}. {c['role']}"
+            if c["history"]:
+                guild_line += f" The company's story begins: {c['history']}..."
+    if isekai:
+        o = origin_of(c)
+        gloss = [ISEKAI_KINDS[k] for k in kinds if k in ISEKAI_KINDS]
+        prompt = ISEKAI_TRAITS_PROMPT.format(
+            setting=premise.setting(e), limits=e["limits"], name=c["name"],
+            gender="female" if c["gender"] else "male", race=RACES.get(c["race"], "unknown"),
+            cls=CLASSES.get(c["cls"], "wanderer"), faction="Horde" if c["race"] in HORDE else "Alliance",
+            earth_name=o.get("earth_name") or "a person whose real name the story gives",
+            origin_line=premise.origin_line(o), guild_line=guild_line, temperament=c["temperament"],
+            backstory=c["backstory"], kinds=", ".join(kinds),
+            kind_gloss=(" (" + "; ".join(gloss) + ".)") if gloss else "",
+            targets=", ".join(t for t, _, _ in e["targets"]), overused=", ".join(OVERUSED_NAMES))
+    else:
+        prompt = TRAITS_PROMPT.format(
+            setting=e["setting"], limits=e["limits"], name=c["name"], gender="female" if c["gender"] else "male",
+            race=RACES.get(c["race"], "unknown"), cls=CLASSES.get(c["cls"], "wanderer"),
+            faction="Horde" if c["race"] in HORDE else "Alliance", standing=eras.standing(c["level"], e),
+            guild_line=guild_line, temperament=c["temperament"], backstory=c["backstory"],
+            kinds=", ".join(kinds), targets=", ".join(t for t, _, _ in e["targets"]),
+            overused=", ".join(OVERUSED_NAMES))
     raw = extract_json(lane.chat([{"role": "user", "content": prompt}], 900, temperature=0.85,
         context={
             "purpose": "lore_traits",
@@ -747,10 +1094,10 @@ def build_traits(lane, c, e, judge, rng):
     introduced = {n for n in OVERUSED_RE.findall(text) if n not in c["backstory"]}
     if introduced:
         problems.append(f"introduces overused name {sorted(introduced)[0]!r}")
-    bad = e["meta"].search(text)
+    bad = meta_for(e, c.get("knows_game", 0)).search(text)
     if bad:
         problems.append(f"out-of-world term: {bad.group(0)!r}")
-    flag = None if problems or not judge else judge.check(eras.judge_prompt(e, text))
+    flag = None if problems or not judge else judge.check(judge_prompt(e, text, c.get("knows_game", 0)))
     return data, kinds, problems, flag
 
 
@@ -772,8 +1119,9 @@ def gen_traits(lane, attempt, e, judge, c, rng):
 
 
 def traits(args):
-    e = eras.get(args.era)
+    e = get_era(args.era)
     ensure_schema()
+    premise_guard()
     lanes = [l for l in fleet.prefer_lanes(args.lanes, args.slots) if "traits" in l.kinds]
     judge = None if args.no_judge else fleet.Judge()
     rows = trait_rows(e, extra=f"ORDER BY l.guid LIMIT {args.limit}" if args.limit else "ORDER BY l.guid")
@@ -793,7 +1141,7 @@ def traits(args):
 
 
 def sample_traits(args):
-    e = eras.get(args.era)
+    e = get_era(args.era)
     ensure_schema()
     lanes = [l for l in fleet.prefer_lanes(args.lanes, args.slots) if "traits" in l.kinds]
     judge = fleet.Judge()
@@ -861,9 +1209,24 @@ disposition or use its word; show it. At most 45 words, speaking to them as "you
 "me" or "my". Reply with only the new description."""
 
 
+# The revision prompts above each open on "a {race} {cls} of the {faction} living in Azeroth". Under the isekai
+# premise that is the one thing they are not, so the clause is swapped rather than every prompt written twice;
+# SOFTEN's "the world is still at war" becomes what this person is actually living through.
+ISEKAI_WHO = (", who is really an ordinary person from the United States or Canada and woke up in Azeroth in "
+              "that body a few days ago.")
+
+
+def premise_prompt(prompt):
+    if not premise.is_isekai():
+        return prompt
+    return (prompt.replace(" living in Azeroth.", ISEKAI_WHO)
+            .replace("The world is\nstill at war and this is not a happy person",
+                     "This person is a\nfew days into a strange, frightening life and is not a happy person"))
+
+
 def reconcile(args):
     """Rewrite personalities that fight their own temperament (plan 30 §2)."""
-    e = eras.get(args.era)
+    e = get_era(args.era)
     tempers = {t[0]: t[1] for t in temperaments()}
     rows = [dict(guid=int(r[0]), name=r[1], race=int(r[2]), cls=int(r[3]), temperament=r[4], personality=r[5])
             for r in sql("SELECT l.guid, c.name, c.race, c.class, l.temperament, "
@@ -879,7 +1242,7 @@ def reconcile(args):
 
     def job(c):
         def run(lane, attempt):
-            prompt = RECONCILE_PROMPT.format(name=c["name"], race=RACES.get(c["race"], "person"),
+            prompt = premise_prompt(RECONCILE_PROMPT).format(name=c["name"], race=RACES.get(c["race"], "person"),
                                              cls=CLASSES.get(c["cls"], "wanderer"),
                                              faction="Horde" if c["race"] in HORDE else "Alliance",
                                              temperament=tempers.get(c["temperament"], ""),
@@ -904,7 +1267,7 @@ def reconcile(args):
             m = TIGHT_LIPPED.search(text)
             if m and not re.match(r"[^.]{0,40}\b(but|yet|until|unless|except|save when|when)\b", text[m.end():], re.I):
                 raise ValueError(f"still tight-lipped: {text[:50]!r}")
-            bad = e["meta"].search(text)
+            bad = meta_for(e, knows_of(c["guid"])).search(text)
             if bad:
                 raise ValueError(f"out-of-world term: {bad.group(0)!r}")
             sql(f"UPDATE lore_character SET personality = {q(text[:400])} WHERE guid = {c['guid']}", fetch=False)
@@ -955,7 +1318,7 @@ only the new description."""
 
 def soften(args):
     """Rewrite grim personalities written under a warm temperament (plan 37 §5 P5)."""
-    e = eras.get(args.era)
+    e = get_era(args.era)
     tempers = {t[0]: t[1] for t in temperaments()}
     rows = [dict(guid=int(r[0]), name=r[1], race=int(r[2]), cls=int(r[3]), temperament=r[4], personality=r[5])
             for r in sql("SELECT l.guid, c.name, c.race, c.class, l.temperament, "
@@ -977,7 +1340,7 @@ def soften(args):
 
     def job(c):
         def run(lane, attempt):
-            prompt = SOFTEN_PROMPT.format(name=c["name"], race=RACES.get(c["race"], "person"),
+            prompt = premise_prompt(SOFTEN_PROMPT).format(name=c["name"], race=RACES.get(c["race"], "person"),
                                           cls=CLASSES.get(c["cls"], "wanderer"),
                                           faction="Horde" if c["race"] in HORDE else "Alliance",
                                           temperament=tempers.get(c["temperament"], ""),
@@ -1001,7 +1364,7 @@ def soften(args):
             # word left in a line that now carries the disposition is fine - this is range, not cheer.
             if len(GRIM_PERSONALITY.findall(text)) >= len(GRIM_PERSONALITY.findall(c["personality"])):
                 raise ValueError(f"no less grim: {text[:50]!r}")
-            bad = e["meta"].search(text)
+            bad = meta_for(e, knows_of(c["guid"])).search(text)
             if bad:
                 raise ValueError(f"out-of-world term: {bad.group(0)!r}")
             sql(f"UPDATE lore_character SET personality = {q(text[:400])} WHERE guid = {c['guid']}", fetch=False)
@@ -1019,7 +1382,7 @@ def soften(args):
 
 def vary_personality(args):
     """Rewrite personality lines that share an opening with many others (plan 15 diversity pass)."""
-    e = eras.get(args.era)
+    e = get_era(args.era)
     base = f"FROM lore_character l WHERE l.era = {q(e['name'])} AND l.personality IS NOT NULL"
     common = [r[0] for r in sql(f"SELECT SUBSTRING_INDEX(l.personality, ' ', 4) o, COUNT(*) {base} "
                                 f"GROUP BY o HAVING COUNT(*) >= {args.min_repeats} ORDER BY 2 DESC")]
@@ -1042,7 +1405,7 @@ def vary_personality(args):
 
     def job(c):
         def run(lane, attempt):
-            prompt = VARY_PROMPT.format(name=c["name"], race=RACES.get(c["race"], "person"),
+            prompt = premise_prompt(VARY_PROMPT).format(name=c["name"], race=RACES.get(c["race"], "person"),
                                         cls=CLASSES.get(c["cls"], "wanderer"),
                                         faction="Horde" if c["race"] in HORDE else "Alliance",
                                         personality=c["personality"], gist=c["gist"], avoid=avoid_text)
@@ -1063,7 +1426,7 @@ def vary_personality(args):
                 raise ValueError(f"voice: {text[:40]!r}")
             if any(text.lower().startswith(a.lower()) for a in avoid):
                 raise ValueError(f"same opening: {text[:30]!r}")
-            bad = e["meta"].search(text)
+            bad = meta_for(e, knows_of(c["guid"])).search(text)
             if bad:
                 raise ValueError(f"out-of-world term: {bad.group(0)!r}")
             sql(f"UPDATE lore_character SET personality = {q(text[:400])} WHERE guid = {c['guid']}", fetch=False)
@@ -1149,7 +1512,7 @@ def vary_traits(args):
     Same shape as vary_personality, for the other two fields of the every-prompt core tier.
     A rewrite must keep the names its source text turns on, so the story stays the same story.
     """
-    e = eras.get(args.era)
+    e = get_era(args.era)
     fields = [f.strip() for f in args.fields.split(",") if f.strip()]
     unknown = [f for f in fields if f not in VARY_FIELDS]
     if unknown:
@@ -1201,7 +1564,7 @@ def vary_traits(args):
                            cls=CLASSES.get(c["cls"], "wanderer"),
                            faction="Horde" if c["race"] in HORDE else "Alliance",
                            avoid=avoid_text, **{k: c[k] for k in (field,) + spec["extra"]})
-                text = re.sub(r"\s+", " ", lane.chat([{"role": "user", "content": spec["prompt"].format(**fmt)}],
+                text = re.sub(r"\s+", " ", lane.chat([{"role": "user", "content": premise_prompt(spec["prompt"]).format(**fmt)}],
                                                      240, temperature=0.9,
                                                          context={
                                                              "purpose": "lore_traits",
@@ -1221,7 +1584,7 @@ def vary_traits(args):
                 if (spec["stock"] and spec["stock"].match(text)) \
                         or any(text.lower().startswith(a.lower()) for a in avoid):
                     raise ValueError(f"same opening: {text[:30]!r}")
-                bad = e["meta"].search(text)
+                bad = meta_for(e, knows_of(c["guid"])).search(text)
                 if bad:
                     raise ValueError(f"out-of-world term: {bad.group(0)!r}")
                 # One passing name may go; the people and places the line turns on may not.
@@ -1250,7 +1613,7 @@ def vary_traits(args):
 
 
 def traits_report(args):
-    e = eras.get(args.era)
+    e = get_era(args.era)
     base = f"FROM lore_character l JOIN characters c ON c.guid = l.guid WHERE l.era = {q(e['name'])} AND l.personality IS NOT NULL"
     total = int(sql(f"SELECT COUNT(*) {base}")[0][0])
     print(f"{total} characters with traits")
@@ -1370,10 +1733,21 @@ GAZETTEER = (
 )
 GAZETTEER_RE = re.compile(r"\b(" + "|".join(re.escape(g) for g in GAZETTEER) + r")\b")
 
+# What breaks the isekai premise in plain words (get_era). Not game vocabulary: a person from home says "game",
+# "player", "server" and "level" without thinking, and one who played says "NPC" and "respawn". What no arrival can
+# have is a life here: born or raised in a land of Azeroth, years or months in this world, or a part in its wars.
+ISEKAI_META = (
+    r"(?:born|raised|grew up) (?:in|on|among|under) (?:the )?(?:azeroth|"
+    + "|".join(re.escape(g.lower()) for g in GAZETTEER) + r")|"
+    r"(?:years|decades|months) (?:here|in azeroth|in this world|since you (?:woke|arrived|came))|"
+    r"(?:veteran|survivor) of the (?:first|second|third) war|"
+    r"(?:fought|served|marched|bled) (?:in|at|through) the (?:first|second|third) war")
+
 
 def misplaced(text, race, story):
     """Lands named in the new text that are neither this people's own nor already in their story."""
-    home = HOMELANDS.get(race, "")
+    # An arrival's people are back home; the lands of this world they know are the ones they woke in.
+    home = (ISEKAI_START if premise.is_isekai() else HOMELANDS).get(race, "")
     return sorted({g for g in GAZETTEER_RE.findall(text) if g not in home and g not in story})
 
 
@@ -1468,12 +1842,49 @@ Nothing here may contradict the story above, and nothing here may repeat it in i
 
 Reply with ONLY a JSON object with the keys craft, craft_short, kin, kin_short. No markdown fences."""
 
+# The working life of an arrival. The trade is still read out of character_skills, so it is still true, but it
+# is something they are learning here, days in, and it may echo the job they had at home or have nothing to do
+# with it. Kin is the family back home first: they are why most arrivals want to go back.
+ISEKAI_LIFE_PROMPT = """{setting}{limits}
+
+This is {name}, a {gender} {race} {cls} of the {faction}: or rather {earth_name}, an ordinary person from home who woke up in that body a few days ago. {origin_line}{guild_line}
+Temperament: {temperament}
+Who they are in any room: {personality}
+Their story, as told to them:
+{backstory}
+What they are living for: {motivation}
+
+{trade_block}
+Where they woke, and the places they know here so far: {homelands}.
+{dead_block}
+Write four things about them that their story did not have room for. Every one speaks to them as "you" and "your": never "I", "me" or "my". Keep every name the story already uses and never introduce the names {overused}. Write any number as a word - "two sisters", "a brother and three cousins" - and give no ages, no prices and no counts of coin.
+1. "craft": the work you are learning here, 25 to 45 words. {trade_line} Say who here is teaching you, or how your hands seem to know it already - the place must be one of those named above, or somewhere your own story already names - one thing about the work that surprised you, and whether it is anything like your old job as {job}.
+2. "craft_short": the same trade in at most 18 words, the way you would mention it in passing. Name the work itself, not only the habit that comes with it.
+3. "kin": your people, 25 to 45 words. First the ones back home: who they are and how many, where they are, and one small true thing about them - what one of them does with their days, a thing one of them always says, something you never got to say to them. Then anyone you have found here who is starting to feel like your people, if there is anyone. Anyone from home the story has not named yet gets an ordinary American or Canadian name that fits their age; arrivals met here go by the names they use here. Small and specific beats sad and grand.
+4. "kin_short": the same household in at most 18 words. Keep who they are, how many and where.
+
+Nothing here may contradict the story above, and nothing here may repeat it in its own words: this is what was left out, not a summary of what was said.
+
+Reply with ONLY a JSON object with the keys craft, craft_short, kin, kin_short. No markdown fences."""
+
+# A person's own death is in half the isekai stories (they died, and walked back as a ghost), and kin_state
+# would read "you died the first night, thinking of your mother" as a dead mother. Those sentences are left out
+# before kin is counted; a mother who really died is still said in a sentence of her own.
+OWN_DEATH_RE = re.compile(r"\byou (?:died|die|were killed|came back|walked back)\b|\bghost\b|\bspirit healer\b", re.I)
+
+
+def kin_text(text):
+    """The text kin_state reads: unchanged under native; under isekai without the sentences of one's own death."""
+    if not premise.is_isekai():
+        return text
+    return " ".join(s for s in re.split(r"(?<=[.!?])\s+", text) if not OWN_DEATH_RE.search(s))
+
 
 def life_rows(e, where="l.craft IS NULL", extra=""):
     """Characters needing a working life, each with the professions they really hold."""
     rows = sql("SELECT l.guid, c.name, c.race, c.class, c.gender, c.level, "
                f"{_flat('t.prompt')}, {_flat('l.backstory')}, {_flat('l.personality')}, "
-               f"{_flat('l.motivation')}, {_flat('g.name')}, {_flat('gr.rname')}, {_flat(ROLE_SQL)} "
+               f"{_flat('l.motivation')}, {_flat('g.name')}, {_flat('gr.rname')}, {_flat(ROLE_SQL)}{origin_sql()} "
                "FROM lore_character l JOIN characters c ON c.guid = l.guid "
                "LEFT JOIN mod_ollama_chat_personality_templates t ON t.`key` = l.temperament "
                "LEFT JOIN guild_member m ON m.guid = l.guid LEFT JOIN guild g ON g.guildid = m.guildid "
@@ -1483,7 +1894,8 @@ def life_rows(e, where="l.craft IS NULL", extra=""):
                f"AND {era_filter(e)} {extra}")
     chars = [dict(guid=int(r[0]), name=r[1], race=int(r[2]), cls=int(r[3]), gender=int(r[4]),
                   level=int(r[5]), temperament=r[6], backstory=r[7], personality=r[8],
-                  motivation=r[9], guild=r[10], rank=r[11], role=r[12], trades=[], secondary=[])
+                  motivation=r[9], guild=r[10], rank=r[11], role=r[12], trades=[], secondary=[],
+                  **origin_fields(r, 13))
              for r in rows]
     if not chars:
         return chars
@@ -1523,6 +1935,40 @@ def contradiction_prompt(story, text):
             'first, quoting the two phrases that clash, or {"out_of_time": false} if it does not.')
 
 
+def isekai_life_prompt(c, e, dead_block):
+    """LIFE_PROMPT under the isekai premise: the same trade, read from character_skills, as something learned here."""
+    o = origin_of(c)
+    trades = c["trades"]
+    job = f"{'an' if o['job'][0] in 'aeiouAEIOU' else 'a'} {o['job']}"
+    if trades:
+        named = ", ".join(t[0] for t in trades)
+        texture = "; ".join(f"{t[0]}: {t[1]}" for t in trades)
+        trade_block = (f"The work {c['name']} has started learning here: {named}. What that work involves - "
+                       f"{texture}.")
+        if c["secondary"]:
+            trade_block += " Besides that, " + ", and ".join(c["secondary"]) + "."
+        trade_line = f"You are learning to be a {named}."
+    else:
+        trade_block = f"{c['name']} has not taken up a trade here yet."
+        if c["secondary"]:
+            trade_block += " What they can do: " + ", and ".join(c["secondary"]) + "."
+        trade_line = ("You have no trade here yet; name the plain work you do to get by - carrying, digging, "
+                      "minding beasts, running errands for a few coppers - and say what from your old life helps.")
+    guild_line = ""
+    if c["guild"]:
+        guild_line = f" Fell in with a band of arrivals called \"{c['guild']}\", rank {c['rank']}. {c['role']}"
+    return ISEKAI_LIFE_PROMPT.format(
+        setting=premise.setting(e), limits=e["limits"], name=c["name"],
+        gender="female" if c["gender"] else "male", race=RACES.get(c["race"], "unknown"),
+        cls=CLASSES.get(c["cls"], "wanderer"), faction="Horde" if c["race"] in HORDE else "Alliance",
+        earth_name=o.get("earth_name") or "a person whose real name the story gives",
+        origin_line=premise.origin_line(o), guild_line=guild_line, temperament=c["temperament"],
+        personality=c["personality"], backstory=c["backstory"], motivation=c["motivation"],
+        trade_block=trade_block, trade_line=trade_line, job=job,
+        homelands=ISEKAI_START.get(c["race"], "their people's homeland"), dead_block=dead_block,
+        overused=", ".join(OVERUSED_NAMES))
+
+
 def build_life(lane, c, e, judge):
     """One call for both fields. Returns (data, problems, flag); nothing is stored here.
 
@@ -1550,7 +1996,7 @@ def build_life(lane, c, e, judge):
         trade_line = ("You were never apprenticed to anything; name the plain work you do for bread - "
                       "carrying, digging, minding beasts, standing a watch for pay - not a craft you "
                       "would have to have been taught.")
-    buried = sorted(r for r, s in kin_state(c["backstory"]).items() if s == "dead")
+    buried = sorted(r for r, s in kin_state(kin_text(c["backstory"])).items() if s == "dead")
     dead_block = ""
     if buried:
         dead_block = ("\nYour story has already buried these: " + ", ".join(buried) +
@@ -1559,16 +2005,19 @@ def build_life(lane, c, e, judge):
     guild_line = ""
     if c["guild"]:
         guild_line = f" Sworn to the company \"{c['guild']}\" with the rank {c['rank']}. {c['role']}"
-    prompt = LIFE_PROMPT.format(
-        setting=e["setting"], limits=e["limits"], name=c["name"],
-        gender="female" if c["gender"] else "male", race=RACES.get(c["race"], "unknown"),
-        cls=CLASSES.get(c["cls"], "wanderer"), faction="Horde" if c["race"] in HORDE else "Alliance",
-        standing=eras.standing(c["level"], e), guild_line=guild_line, temperament=c["temperament"],
-        personality=c["personality"], backstory=c["backstory"], motivation=c["motivation"],
-        trade_block=trade_block, trade_line=trade_line,
-        homelands=HOMELANDS.get(c["race"], "wherever their people settled"),
-        kin_framing=KIN_FRAMING.get(c["race"], ""), dead_block=dead_block,
-        overused=", ".join(OVERUSED_NAMES))
+    if premise.is_isekai():
+        prompt = isekai_life_prompt(c, e, dead_block)
+    else:
+        prompt = LIFE_PROMPT.format(
+            setting=e["setting"], limits=e["limits"], name=c["name"],
+            gender="female" if c["gender"] else "male", race=RACES.get(c["race"], "unknown"),
+            cls=CLASSES.get(c["cls"], "wanderer"), faction="Horde" if c["race"] in HORDE else "Alliance",
+            standing=eras.standing(c["level"], e), guild_line=guild_line, temperament=c["temperament"],
+            personality=c["personality"], backstory=c["backstory"], motivation=c["motivation"],
+            trade_block=trade_block, trade_line=trade_line,
+            homelands=HOMELANDS.get(c["race"], "wherever their people settled"),
+            kin_framing=KIN_FRAMING.get(c["race"], ""), dead_block=dead_block,
+            overused=", ".join(OVERUSED_NAMES))
     raw = extract_json(lane.chat([{"role": "user", "content": prompt}], 700, temperature=0.85,
         context={
             "purpose": "lore_life",
@@ -1597,14 +2046,14 @@ def build_life(lane, c, e, judge):
             # Invariant 1. A count of siblings is in-world and wanted; a figure is not.
             problems.append(f"{key} uses a figure, not a word: {data[key][:40]!r}")
     text = " ".join(data[k] for k, _, _ in LIFE_WORDS)
-    revived = sorted(r for r, s in kin_state(text).items()
-                     if s == "living" and kin_state(c["backstory"]).get(r) == "dead")
+    revived = sorted(r for r, s in kin_state(kin_text(text)).items()
+                     if s == "living" and kin_state(kin_text(c["backstory"])).get(r) == "dead")
     if revived:
         problems.append(f"brings back the dead: {revived[0]}")
     introduced = {n for n in OVERUSED_RE.findall(text) if n not in c["backstory"]}
     if introduced:
         problems.append(f"introduces overused name {sorted(introduced)[0]!r}")
-    bad = e["meta"].search(text)
+    bad = meta_for(e, c.get("knows_game", 0)).search(text)
     if bad:
         problems.append(f"out-of-world term: {bad.group(0)!r}")
     astray = misplaced(text, c["race"], c["backstory"])
@@ -1613,7 +2062,7 @@ def build_life(lane, c, e, judge):
 
     flag = None
     if not problems and judge:
-        flag = judge.check(eras.judge_prompt(e, text))
+        flag = judge.check(judge_prompt(e, text, c.get("knows_game", 0)))
         if not flag:
             flag = judge.check(contradiction_prompt(c["backstory"], text))
     return data, problems, flag
@@ -1636,8 +2085,9 @@ def gen_life(lane, attempt, e, judge, c):
 
 def crafts(args):
     """A trade and a household for every character that lacks one (plan 33)."""
-    e = eras.get(args.era)
+    e = get_era(args.era)
     ensure_schema()
+    premise_guard()
     lanes = [l for l in fleet.prefer_lanes(args.lanes, args.slots) if "traits" in l.kinds]
     judge = None if args.no_judge else fleet.Judge()
     where = "1 = 1" if args.rewrite else "l.craft IS NULL"
@@ -1660,7 +2110,7 @@ def crafts(args):
 
 def sample_crafts(args):
     """Print a working life for random characters on each lane; stores nothing."""
-    e = eras.get(args.era)
+    e = get_era(args.era)
     ensure_schema()
     lanes = [l for l in fleet.prefer_lanes(args.lanes, args.slots) if "traits" in l.kinds]
     judge = fleet.Judge()
@@ -1678,7 +2128,7 @@ def sample_crafts(args):
         except Exception as ex:
             return head.format(time.time() - t0) + f"\n   FAILED {ex}"
         out = [head.format(time.time() - t0)]
-        buried = sorted(r for r, s in kin_state(c["backstory"]).items() if s == "dead")
+        buried = sorted(r for r, s in kin_state(kin_text(c["backstory"])).items() if s == "dead")
         if buried:
             out.append(f"   buried by the story: {', '.join(buried)}")
         for k, _, _ in LIFE_WORDS:
@@ -1707,12 +2157,13 @@ def unguilded_bots(e, extra=""):
 
 
 def generate(args):
-    e = eras.get(args.era)
+    e = get_era(args.era)
     ensure_schema()
     other = sql(f"SELECT (SELECT COUNT(*) FROM lore_guild WHERE era <> {q(e['name'])}) + "
                 f"(SELECT COUNT(*) FROM lore_character WHERE era <> {q(e['name'])})")[0][0]
     if int(other):
         sys.exit(f"{other} lore rows belong to another era; run `reset` first")
+    premise_guard()
     tempers = temperaments()
     lanes = fleet.prefer_lanes(args.lanes, args.slots)
     judge = None if args.no_judge else fleet.Judge()
@@ -1778,7 +2229,7 @@ def generate(args):
 
 
 def sample(args):
-    e = eras.get(args.era)
+    e = get_era(args.era)
     tempers = temperaments()
     lanes = fleet.prefer_lanes(args.lanes, args.slots)
     judge = fleet.Judge()
@@ -1787,23 +2238,24 @@ def sample(args):
     def one(lane, c):
         t0 = time.time()
         try:
-            text = check_backstory(lane.chat([{"role": "user",
-                                               "content": char_prompt(c, random.choice(tempers), None, e)}], 500,
-                                                   context={
-                                                       "purpose": "lore_backstory",
-                                                       "source": "lore/gen_backstories.py",
-                                                       "stage": "sample.one",
-                                                       "route": "batch",
-                                                       "bot": c.get("name"),
-                                                       "bot_guid": c.get("guid"),
-                                                   }))
+            text, o = ask_backstory(lane, c, char_prompt(c, random.choice(tempers), None, e), 500,
+                                    context={
+                                        "purpose": "lore_backstory",
+                                        "source": "lore/gen_backstories.py",
+                                        "stage": "sample.one",
+                                        "route": "batch",
+                                        "bot": c.get("name"),
+                                        "bot_guid": c.get("guid"),
+                                    })
         except Exception as ex:
             return f"== {lane.name}: {c['name']} FAILED {ex}"
         dt = time.time() - t0
-        bad = e["meta"].search(text)
-        verdict = judge.check(eras.judge_prompt(e, text))
+        knows = (o or {}).get("knows_game", 0)
+        bad = meta_for(e, knows).search(text)
+        verdict = judge.check(judge_prompt(e, text, knows))
         return (f"== {lane.name} ({dt:.0f}s) {c['name']}, {RACES[c['race']]} {CLASSES[c['cls']]} level {c['level']}\n"
-                f"   regex: {bad.group(0) if bad else 'clean'}; judge: {verdict or 'clean'}\n   {text}")
+                + (f"   from home: {o['earth_name']}, {premise.origin_line(o)}\n" if o else "")
+                + f"   regex: {bad.group(0) if bad else 'clean'}; judge: {verdict or 'clean'}\n   {text}")
 
     with cf.ThreadPoolExecutor(len(lanes)) as ex:
         for out in ex.map(one, lanes, bots):
@@ -1942,7 +2394,7 @@ def build_restand(lane, c, e, keep):
     introduced = {n for n in OVERUSED_RE.findall(new_all) if n not in old_all}
     if introduced:
         problems.append(f"introduces overused name {sorted(introduced)[0]!r}")
-    bad = e["meta"].search(new_all)
+    bad = meta_for(e, knows_of(c["guid"])).search(new_all)
     if bad:
         problems.append(f"out-of-world term: {bad.group(0)!r}")
     if not problems and all(data[f] == c[f] for f in RESTAND_FIELDS):
@@ -1966,7 +2418,14 @@ def gen_restand(lane, attempt, e, judge, c, dry_run, keep):
 
 
 def restand(args):
-    e = eras.get(args.era)
+    e = get_era(args.era)
+    if premise.is_isekai():
+        # Every isekai story is written at the start of the road and lived forward: a person who has gained
+        # levels since has done so inside the story, and nothing in it claims a standing they have outgrown.
+        # The levels they gain belong to what happens to them next (the chronicle), not to a rewritten past.
+        log("restand: nothing to do under the isekai premise; every story starts at the beginning of the road, "
+            "and levels gained since are lived, not re-fitted")
+        return 0
     ensure_schema()
     chars = restand_rows(e)
     if args.limit:
@@ -2226,18 +2685,16 @@ def build_bond(lane, c, m, kind, concept, others, e, keep=()):
 
 
 def gen_alt_backstory(lane, attempt, e, judge, c, temper, bond, m, concept="", keep=()):
-    text = check_backstory(lane.chat(
-        [{"role": "user", "content": char_prompt(c, temper, None, e, bond=bond, main_name=m["name"],
-                                                 concept=concept, main_sheet=m["sheet"], keep=keep)}], 600,
-                                                     context={
-                                                         "purpose": "player_lore",
-                                                         "source": "lore/gen_backstories.py",
-                                                         "stage": "gen_alt_backstory",
-                                                         "route": "batch",
-                                                         "bot": c.get("name"),
-                                                         "bot_guid": c.get("guid"),
-                                                     }),
-        ALT_STORY_WORDS)
+    text, o = ask_backstory(lane, c, char_prompt(c, temper, None, e, bond=bond, main_name=m["name"],
+                                                 concept=concept, main_sheet=m["sheet"], keep=keep), 600,
+                            context={
+                                "purpose": "player_lore",
+                                "source": "lore/gen_backstories.py",
+                                "stage": "gen_alt_backstory",
+                                "route": "batch",
+                                "bot": c.get("name"),
+                                "bot_guid": c.get("guid"),
+                            }, words_range=ALT_STORY_WORDS)
     if m["name"].lower() not in text.lower():
         raise ValueError(f"does not name {m['name']}")
     # Traits the player named belong here rather than in the bond: a bond says what is between two people, so
@@ -2245,11 +2702,16 @@ def gen_alt_backstory(lane, attempt, e, judge, c, temper, bond, m, concept="", k
     missing = [k for k in keep if k.lower() not in text.lower()]
     if missing:
         raise ValueError("dropped: " + ", ".join(missing))
-    vet(text, e, judge, attempt, f"alt {c['guid']} {c['name']}")
-    sql("INSERT INTO lore_character (guid, guildid, temperament, backstory, model, era) VALUES "
+    vet(text, e, judge, attempt, f"alt {c['guid']} {c['name']}", (o or {}).get("knows_game", 0))
+    cols, vals = origin_columns(o)
+    # Under isekai a rewritten story is a person drawn again from home, so what they know of the game starts
+    # over from the draw: whoever told the old story about the game did not tell this one.
+    again = (", premise = VALUES(premise), origin = VALUES(origin), knows_game = VALUES(knows_game), "
+             "knows_game_from = NULL") if o else ""
+    sql(f"INSERT INTO lore_character (guid, guildid, temperament, backstory, model, era{cols}) VALUES "
         f"({c['guid']}, NULL, {q(temper[0])}, {q(text)}, {q((lane.name + ':' + lane.model)[:64])}, "
-        f"{q(e['name'])}) ON DUPLICATE KEY UPDATE backstory = VALUES(backstory), "
-        f"temperament = VALUES(temperament), model = VALUES(model), era = VALUES(era)", fetch=False)
+        f"{q(e['name'])}{vals}) ON DUPLICATE KEY UPDATE backstory = VALUES(backstory), "
+        f"temperament = VALUES(temperament), model = VALUES(model), era = VALUES(era){again}", fetch=False)
     return text
 
 
@@ -2316,7 +2778,7 @@ def seed_bond_regard(e, guids=None, dry_run=False):
 
 
 def bond_regard(args):
-    e = eras.get(args.era)
+    e = get_era(args.era)
     guids = None
     if args.names:
         names = [n.strip() for n in args.names.split(",") if n.strip()]
@@ -2330,7 +2792,7 @@ def bond_regard(args):
 
 
 def alts(args):
-    e = eras.get(args.era)
+    e = get_era(args.era)
     ensure_schema()
     names = [n.strip() for n in args.names.split(",") if n.strip()] if args.names else None
     rows = alt_rows(e, names, getattr(args, "account", 0))
@@ -2415,9 +2877,9 @@ def alts(args):
         for attempt in range(1, args.attempts + 1):
             try:
                 if args.dry_run:
-                    text = check_backstory(lane.chat([{"role": "user", "content": char_prompt(
+                    text, _origin = ask_backstory(lane, c, char_prompt(
                         c, temper, None, e, bond=bond, main_name=m["name"], concept=concept,
-                        main_sheet=m["sheet"], keep=keep_story)}], 600,
+                        main_sheet=m["sheet"], keep=keep_story), 600,
                             context={
                                 "purpose": "player_lore",
                                 "source": "lore/gen_backstories.py",
@@ -2425,7 +2887,7 @@ def alts(args):
                                 "route": "batch",
                                 "bot": c.get("name"),
                                 "bot_guid": c.get("guid"),
-                            }), ALT_STORY_WORDS)
+                            }, words_range=ALT_STORY_WORDS)
                 else:
                     text = gen_alt_backstory(lane, attempt, e, judge, c, temper, bond, m, concept, keep_story)
                 break
@@ -2539,7 +3001,7 @@ def build_main_sheet(lane, c, e, source):
 
 def main_sheet(args):
     import hashlib
-    e = eras.get(args.era)
+    e = get_era(args.era)
     ensure_schema()
     rows = sql("SELECT guid, name, race, class, level FROM characters WHERE name = " + q(args.name))
     if not rows:
@@ -2603,6 +3065,25 @@ def project(_args):
 
     craft_s, kin_s = life("craft_short", "Your trade"), life("kin_short", "Your people")
     craft_f, kin_f = life("craft", "Your trade"), life("kin", "Your people")
+    premise_guard()
+    # Isekai: how long they have been here and what they know of the game, in both tiers, after the story they
+    # follow from. Both change after the story is written -- the day count every day, knows_game whenever
+    # awareness.py spreads the word -- so they are made here, on every projection, and never stored in a text.
+    # The line for someone who was told names who told them, so it is built in SQL around the teller's name.
+    here, kf_join = "", ""
+    if premise.is_isekai():
+        mark = "\x01"
+        told = premise.knowledge_line(1, mark)
+        # Without a teller, premise.knowledge_line opens the sentence on "another arrival", in lower case.
+        nobody = premise.knowledge_line(1)
+        told_sql = q(nobody[:1].upper() + nobody[1:])
+        if mark in told:
+            before, after = told.split(mark, 1)
+            told_sql = f"IF(kf.name IS NULL, {told_sql}, CONCAT({q(before)}, kf.name, {q(after)}))"
+        knows = (f"CASE WHEN l.knows_game >= 2 THEN {q(premise.knowledge_line(2))} "
+                 f"WHEN l.knows_game = 1 THEN {told_sql} ELSE {q(premise.knowledge_line(0))} END")
+        here = f", ' ', {q(premise.days_line())}, ' ', {knows}"
+        kf_join = " LEFT JOIN characters kf ON kf.guid = l.knows_game_from"
     sql("START TRANSACTION;"
         "DELETE FROM mod_ollama_chat_personality WHERE personality LIKE 'BIO\\_%';"
         "DELETE FROM mod_ollama_chat_personality_templates WHERE `key` LIKE 'BIO\\_%' OR `key` LIKE 'BIOX\\_%';"
@@ -2618,17 +3099,18 @@ def project(_args):
         # was being thrown away. It goes first because a disposition is read as a voice, and the paragraph
         # after it as history.
         "INSERT INTO mod_ollama_chat_personality_templates (`key`, prompt, manual_only) "
-        "SELECT CONCAT('BIO_', l.guid), IF(l.personality IS NULL, CONCAT(t.prompt, ' ', l.backstory, " + notes + "), "
-        "CONCAT(t.prompt, ' ', l.personality, ' ', l.gist, " + notes + ", " + craft_s + ", " + kin_s +
+        "SELECT CONCAT('BIO_', l.guid), IF(l.personality IS NULL, CONCAT(t.prompt, ' ', l.backstory, " + notes + here + "), "
+        "CONCAT(t.prompt, ' ', l.personality, ' ', l.gist, " + notes + here + ", " + craft_s + ", " + kin_s +
         ", ' What drives you: ', l.motivation_short)), 1 "
-        "FROM lore_character l JOIN mod_ollama_chat_personality_templates t ON t.`key` = l.temperament;"
+        "FROM lore_character l JOIN mod_ollama_chat_personality_templates t ON t.`key` = l.temperament"
+        + kf_join + ";"
         # Full tier, when someone speaks to the bot (mod-ollama-chat local patch): the same voice, then
         # personality, the whole backstory and the whole motivation.
         "INSERT INTO mod_ollama_chat_personality_templates (`key`, prompt, manual_only) "
-        "SELECT CONCAT('BIOX_', l.guid), CONCAT(t.prompt, ' ', l.personality, ' ', l.backstory, " + notes +
+        "SELECT CONCAT('BIOX_', l.guid), CONCAT(t.prompt, ' ', l.personality, ' ', l.backstory, " + notes + here +
         ", " + craft_f + ", " + kin_f + ", ' What drives you: ', l.motivation), 1 "
-        "FROM lore_character l JOIN mod_ollama_chat_personality_templates t ON t.`key` = l.temperament "
-        "WHERE l.personality IS NOT NULL;"
+        "FROM lore_character l JOIN mod_ollama_chat_personality_templates t ON t.`key` = l.temperament"
+        + kf_join + " WHERE l.personality IS NOT NULL;"
         "REPLACE INTO mod_ollama_chat_personality (guid, personality) "
         "SELECT guid, CONCAT('BIO_', guid) FROM lore_character;"
         "UPDATE guild g JOIN lore_guild l ON l.guildid = g.guildid SET g.info = l.charter, g.motd = l.motto;"
@@ -2668,7 +3150,7 @@ def era_scan(args):
     added to the pattern. Reports only; nothing is rewritten. Exit 1 when anything matched, so a phase
     check can depend on it.
     """
-    e = eras.get(args.era)
+    e = get_era(args.era)
     # table, key column, what one row is, and every column a model wrote into it.
     targets = [
         ("lore_character", "guid", "character", ("backstory", "personality", "gist", "motivation",

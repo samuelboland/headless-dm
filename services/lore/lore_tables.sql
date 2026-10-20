@@ -89,6 +89,14 @@ CREATE TABLE IF NOT EXISTS lore_character (
     craft_short  VARCHAR(255) NULL     COMMENT 'The trade in one line; every prompt',
     kin          VARCHAR(600) NULL     COMMENT 'Your people, ~45 words; read when addressed',
     kin_short    VARCHAR(255) NULL     COMMENT 'The household in one line; every prompt',
+    -- The premise (services/common/premise.py). Under isekai every character is a person from the United
+    -- States or Canada who woke up here days ago: origin is who they were (premise.origin() as drawn, plus
+    -- the real name the model chose for them), and knows_game is what they know of the game, which
+    -- awareness.py raises as word spreads. Native rows keep the defaults and nothing reads them.
+    premise      VARCHAR(16)  NOT NULL DEFAULT 'native' COMMENT 'premise.py premise the text was written for',
+    origin       JSON         NULL     COMMENT 'isekai: premise.origin() as drawn, plus the earth_name the model chose',
+    knows_game   TINYINT      NOT NULL DEFAULT 0 COMMENT 'isekai: 0 no idea, 1 told by someone, 2 played it',
+    knows_game_from INT UNSIGNED NULL  COMMENT 'isekai: guid of the character who told them (knows_game 1)',
     model        VARCHAR(64)  NOT NULL,
     era          VARCHAR(16)  NOT NULL DEFAULT 'wotlk' COMMENT 'era.py setting the text was written for',
     generated_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,

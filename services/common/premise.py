@@ -170,7 +170,7 @@ def knowledge_line(level, source_name=None):
                 "people, even what is coming. You can't prove it to anyone, and you wonder what it means for "
                 "getting home.")
     if level == 1:
-        who = source_name or "another arrival"
+        who = source_name or "Another arrival"
         return (f"{who} told you this world is a computer game called World of Warcraft, one they used to play. "
                 "You haven't decided whether you believe it.")
     return ("You have no idea where this place is. Nobody you have met has been able to explain it, and you "
@@ -199,3 +199,44 @@ def days_line(today=None):
     if n == 1:
         return "You woke up here yesterday."
     return f"You woke up here {n} days ago."
+
+
+# ---------------------------------------------------------------------------
+# the judge's question, for the isekai premise
+#
+# era.judge_prompt asks whether a text treats a later age as real. That question is still asked here, but it is
+# not the only one: a story can be true to the era and still break this premise, by giving a person years of
+# history in Azeroth, deeds no one can do in their first few days, or a life that never happened in the real
+# world. A gamer's knowledge of later chapters is the one thing the era judge would wrongly flag, so it is
+# allowed here, and only as knowledge of the game.
+
+GAME_KNOWLEDGE = {
+    0: "This person has never played World of Warcraft and does not know this world comes from a game. Any "
+       "knowledge of the game, or of what is coming, is wrong for them.",
+    1: "Another arrival has told this person this world is from a computer game called World of Warcraft. They "
+       "may repeat what they were told, as hearsay, but they never played it themselves.",
+    2: "This person played World of Warcraft back home. They may know of the game's later chapters and say so, "
+       "but only as things the game had (\"in the game, ...\"), never as things that have happened here.",
+}
+
+
+def judge_prompt(e, text, knows_game=0, known=()):
+    """The isekai counterpart of era.judge_prompt; the same reply shape, so fleet.Judge reads it unchanged."""
+    names = ", ".join(sorted({n for n in known if n}))
+    return ("You check writing for a story with a fixed premise. " + setting(e) + "\n\n"
+            "These belong to Azeroth's present or past and are fine: " + e["judge_allowed"] + "\n\n"
+            + ("These are people, companies and creatures of the present, and naming them is fine: " + names + "\n\n"
+               if names else "")
+            + "These have NOT happened in Azeroth yet: " + e["judge_forbidden"] + "\n\n"
+            + GAME_KNOWLEDGE.get(knows_game, GAME_KNOWLEDGE[0]) + "\n\n"
+            "The person in the text is an ordinary person from the United States or Canada who arrived a few "
+            "days ago. Real places, brands, jobs and everyday life back home are fine, and so are the words "
+            "game, player, server and level.\n\n"
+            'Text:\n"""\n' + text + '\n"""\n\n'
+            "Is any of these true? (1) The text treats something that has not happened in Azeroth yet as having "
+            "happened here, or knows of it in a way this person could not. (2) It gives the person deeds, fame, "
+            "rank or years of history in Azeroth beyond a few days at the very start of the road: no great "
+            "battles, no campaigns, no titles, no childhood there. (3) It makes them anything but an ordinary "
+            "person from the real United States or Canada: born in Azeroth, from an invented country, or a "
+            "famous or real, identifiable person. Mentions of things that are fine do not count. Reply with "
+            'JSON only: {"out_of_time": true or false, "evidence": "the offending words, or an empty string"}')
