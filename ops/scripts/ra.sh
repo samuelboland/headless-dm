@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ra.sh "cmd1" "cmd2" ...: run GM console commands over RA (127.0.0.1:3443) and print the replies.
+# ra.sh "cmd1" "cmd2" ...: run GM console commands over RA ($RA_HOST:$RA_PORT, default 127.0.0.1:3443) and print the replies.
 # Credentials come from RA_USER / RA_PASS in the environment, or from $RA_ENV
 # (default ~/.config/custom-wow/ra.env, chmod 600, lines RA_USER=... and RA_PASS=...).
 #
@@ -16,5 +16,5 @@ RA_ENV=${RA_ENV:-$HOME/.config/custom-wow/ra.env}
   sleep 2
   for c in "$@"; do printf '%s\r\n' "$c"; sleep 4; done
   printf 'quit\r\n'
-} | timeout $((20 + 4 * $#)) nc -q 3 127.0.0.1 3443 | tr -d '\r' | sed 's/AC>/\n/g' \
+} | timeout $((20 + 4 * $#)) nc -q 3 "${RA_HOST:-127.0.0.1}" "${RA_PORT:-3443}" | tr -d '\r' | sed 's/AC>/\n/g' \
   | grep -viE '^(Password|Username|Authentication Required|Bye|AzerothCore rev)|^\s*$' || true

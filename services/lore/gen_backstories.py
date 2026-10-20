@@ -2326,6 +2326,7 @@ def generate(args):
 
 def sample(args):
     e = get_era(args.era)
+    ensure_schema()   # the sample is the first lore command run on a new realm; person_kind is made here
     tempers = temperaments()
     lanes = fleet.prefer_lanes(args.lanes, args.slots)
     judge = fleet.Judge()
