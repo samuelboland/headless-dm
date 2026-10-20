@@ -2763,7 +2763,11 @@ def commit_incidents(incidents, era):
     return len(kept)
 
 
-def stance_words(stance):
+ISEKAI_STANCE_WORDS = {"blood feud": "bitter grudge", "rivals": "at odds", "wary": "wary", "indifferent": "indifferent",
+                       "on good terms": "on good terms", "friends": "friends", "sworn allies": "close allies"}
+
+
+def stance_key(stance):
     if stance <= -60:
         return "blood feud"
     if stance <= -30:
@@ -2777,6 +2781,11 @@ def stance_words(stance):
     if stance < 60:
         return "friends"
     return "sworn allies"
+
+
+def stance_words(stance):
+    key = stance_key(stance)
+    return ISEKAI_STANCE_WORDS[key] if premise.is_isekai() else key
 
 
 def companies_snapshot():
@@ -2840,6 +2849,12 @@ def companies_snapshot():
 
 COMPANY_TALK = {"blood feud": "are in a blood feud", "rivals": "are bitter rivals", "wary": "are wary of each other",
                 "on good terms": "are on good terms", "friends": "are friends", "sworn allies": "are sworn allies"}
+if premise.is_isekai():
+    # Bands of arrivals days old: a falling-out, a deal, a grudge over a kill or a camp spot, help given. Keys stay
+    # the stance_key names; only the words change.
+    COMPANY_TALK = {"blood feud": "fell out badly and are not speaking", "rivals": "are at odds over a kill and a spot to camp",
+                    "wary": "keep an eye on each other", "on good terms": "have been on good terms since a trade of favours",
+                    "friends": "are friends, having helped each other out", "sworn allies": "have each other's backs"}
 WORDS_LANDS = 4          # lands named in one sentence before "and elsewhere"
 WORDS_RECENT_DAYS = 3
 
@@ -2888,38 +2903,44 @@ def company_words():
         "SELECT guild_a, COALESCE(guild_b, 0), detail FROM guild_incident "
         f"WHERE kind <> 'claimed' AND ts > NOW() - INTERVAL {WORDS_RECENT_DAYS} DAY ORDER BY id DESC")]
 
+    isekai = premise.is_isekai()
+    other = "another band" if isekai else "another company"
     guild_rows = []
     for gid, name in sorted(names.items()):
-        parts = [f"Your company, {name}, keeps seats in {join_names(seats[gid])}." if gid in seats
-                 else f"You are sworn to the company {name}."]
-        holds = [land_name(z) for z, h, c in holding if h == gid and not c]
-        if holds:
-            parts.append(f"It holds {join_names(holds)}.")
-        for z, h, c in [x for x in holding if x[1] == gid and x[2]][:2]:
-            parts.append(f"It holds {land_name(z)}, but {names.get(c, 'another company')} are pushing to take it.")
-        for z, h, c in [x for x in holding if x[2] == gid][:2]:
-            parts.append(f"It is pushing into {land_name(z)}, held by {names.get(h, 'another company')}.")
+        if isekai:
+            # No seats, holdings or sway: a band is a few people who found each other days ago.
+            parts = [f"You are part of {name}, a band of people who found each other after waking up here a few days ago."]
+        else:
+            parts = [f"Your company, {name}, keeps seats in {join_names(seats[gid])}." if gid in seats
+                     else f"You are sworn to the company {name}."]
+            holds = [land_name(z) for z, h, c in holding if h == gid and not c]
+            if holds:
+                parts.append(f"It holds {join_names(holds)}.")
+            for z, h, c in [x for x in holding if x[1] == gid and x[2]][:2]:
+                parts.append(f"It holds {land_name(z)}, but {names.get(c, 'another company')} are pushing to take it.")
+            for z, h, c in [x for x in holding if x[2] == gid][:2]:
+                parts.append(f"It is pushing into {land_name(z)}, held by {names.get(h, 'another company')}.")
         mine = sorted(((stance, b if a == gid else a, a_says if a == gid else b_says)
                        for a, b, stance, a_says, b_says in relations if gid in (a, b)), key=lambda r: r[0])
-        foe = next((r for r in mine if stance_words(r[0]) in ("blood feud", "rivals", "wary")), None)
+        foe = next((r for r in mine if stance_key(r[0]) in ("blood feud", "rivals", "wary")), None)
         if foe:
-            line = f"Your company and {names.get(foe[1], 'another company')} {COMPANY_TALK[stance_words(foe[0])]}"
+            line = f"{'Your band' if isekai else 'Your company'} and {names.get(foe[1], other)} {COMPANY_TALK[stance_key(foe[0])]}"
             says = foe[2].strip()
             if says:
                 says += "" if says[-1] in ".!?" else "."
                 parts.append(f"{line}; your people say of them: \"{says}\"")
             else:
                 parts.append(line + ".")
-        friend = next((r for r in reversed(mine) if stance_words(r[0]) in ("on good terms", "friends", "sworn allies")), None)
+        friend = next((r for r in reversed(mine) if stance_key(r[0]) in ("on good terms", "friends", "sworn allies")), None)
         if friend:
-            parts.append(f"Your company and {names.get(friend[1], 'another company')} {COMPANY_TALK[stance_words(friend[0])]}.")
+            parts.append(f"{'Your band' if isekai else 'Your company'} and {names.get(friend[1], other)} {COMPANY_TALK[stance_key(friend[0])]}.")
         last = next((d for a, b, d in recent if gid in (a, b)), None)
         if last:
             parts.append(f"Lately: {last}.")
         guild_rows.append((gid, " ".join(parts)[:1000]))
 
     land_rows = []
-    for z, h, c in holding:
+    for z, h, c in ([] if isekai else holding):   # isekai: nobody holds sway over a land days after arriving
         line = f"In {land_name(z)}, {names.get(h, 'a company')} hold sway"
         land_rows.append((z, (line + (f", and {names[c]} are pushing to take it" if c in names else "") + ".")[:255]))
 

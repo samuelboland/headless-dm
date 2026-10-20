@@ -64,6 +64,15 @@ DISPOSITIONS = {
     "respect": (15, "grudging respect: little love between them, but each has seen the other's worth"),
     "allies": (45, "friendship: they have fought side by side and owe each other debts"),
 }
+if premise.is_isekai():
+    # Bands days old: nothing is "old" or "bitter for years"; same keys and stances.
+    DISPOSITIONS = {
+        "enemies": (-70, "open hatred: a fight, a killing blow or a betrayal in the last few days that neither side will forgive"),
+        "rivals": (-45, "a sharp rivalry: they keep running into each other over the same kills, the same camp spots and the same quests"),
+        "wary": (-20, "wary distrust: a bad first meeting or a rumour, though no open quarrel"),
+        "respect": (15, "grudging respect: little warmth between them, but each has seen the other pull its weight"),
+        "allies": (45, "friendship: they have helped each other out of a tight spot in the last few days and owe each other"),
+    }
 STANCE_JITTER = 7
 # (same faction, share a seat) -> weights
 DRAW_WEIGHTS = {
@@ -93,6 +102,13 @@ A company with members of every seasoning keeps a seat (a hall, a camp, a watcht
 
 Reply with ONLY a JSON object, no markdown fences:
 {{{shape}}}"""
+if premise.is_isekai():
+    # A band days old keeps no hall or watchtower: a seat is where its people have taken to gathering.
+    SEAT_PROMPT = SEAT_PROMPT.replace(
+        "A company with members of every seasoning keeps a seat (a hall, a camp, a watchtower, a claim) in each kind of country its people travel.",
+        "A band whose members are at every stage of leveling has taken to gathering (a camp, a corner of an inn, a spot by a road, a ruin) in each kind of country its people travel.").replace(
+        "Choose where this company keeps its seats", "Choose where this band gathers").replace(
+        "what the company keeps there and why", "why the band gathers there")
 
 RELATION_PROMPT = PREAMBLE + """
 
@@ -534,6 +550,14 @@ Its history: {history}
 Name the five standings in this company, from the one who leads it down to its newest recruit, as its own people call them. These are titles anyone in that place would hold, not descriptions of particular people: a title of one or two words (three at most), at most 18 letters and spaces, fitting this company's character. No possessives, no leading "The". Not the plain words leader, master, officer, veteran, member or initiate; no ranks of the Alliance or Horde armies; no numbers; nothing outside the world.
 Other companies already use these titles, so choose none of them: {taken}.
 Reply with JSON only: {{"ranks": ["who leads", "second", "third", "fourth", "newest recruit"]}}"""
+if premise.is_isekai():
+    RANKS_PROMPT = RANKS_PROMPT.replace("The company {name} serves the {faction}.", "The band {name} is made of arrivals who joined the {faction}.").replace(
+        "as its own people call them. These are titles anyone in that place would hold, not descriptions of particular people:",
+        "as the people in it would call them days in, half joking and half practical, borrowed from jobs, sports, gaming, the military or family. These are titles, not descriptions of particular people:").replace(
+        "fitting this company's character", "fitting this band's character, short and varied").replace(
+        "; nothing outside the world.", ".").replace("Other companies already", "Other bands already").replace(
+        "in this company,", "in this band,").replace(
+        "newest recruit", "newest arrival")
 RANK_TITLE = re.compile(r"^(?!the )[A-Za-z][A-Za-z -]*$", re.I)   # no possessives, no leading "The"
 PLAIN_RANKS = {"guild master", "master", "leader", "officer", "veteran", "member", "initiate"}
 

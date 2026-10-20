@@ -23,9 +23,12 @@ Read `docs/EXTENDING.md` first. The architecture, and the rules the design keeps
 - **Bots are people living in Azeroth, never players.** Nothing a bot reads uses game vocabulary or numbers.
   Roleplay is always on.
 - **Unless `PREMISE=isekai`** (`docs/ISEKAI.md`). Then every bot and the player is a person from the US or Canada
-  who woke up in Azeroth days ago. They talk like who they were, and the ones who played may call it a game. Only
-  screen talk (figures, cooldowns, the quest log) stays out. No shared chat prompt says it is a game: beyond the ones who played, that word travels
-  only through `services/lore/awareness.py`. Every isekai change is guarded so native behaviour stays identical.
+  trapped in Azeroth since a few days ago, with a Sword Art Online feel: everyone feels levels, health and skills
+  and may say it works like a game; nobody knows whether death is safe. They talk like who they were. What only
+  some know is that it is World of Warcraft: no shared chat prompt names the game, and beyond the ones who played,
+  that word travels only through `services/lore/awareness.py`. Each person's facts are drawn from their guid
+  (`services/common/premise.py`, `people.py`), never left to the model. Every isekai change is guarded so native
+  behaviour stays identical.
 - **The world's clock is the era in `site/site.env`.** Nothing later has happened.
 - **Game objects only on the world thread.** Every model-driven behaviour has a chance gate and a kill switch, and
   defaults to off.

@@ -298,11 +298,11 @@ Write the story of an ordinary person from the real world who is now {name}, a {
 {origin_line}
 Temperament: {temperament}
 {guild_block}
-{keep_block}First, choose their real name from back home: an ordinary first and last name that fits someone of their age and background from {home}. Not a famous person, not anyone real and identifiable, and none of {overused}. "{name}" is what they have gone by here, what the people of this world call them; the story uses both names.
+{keep_block}Every fact above is this person, drawn for them; write to it, and do not trade any of it for something more dramatic or more typical. Their real name from back home is {earth_name}. "{name}" is what they have gone by here, what the people of this world call them, and the story says "{name}" at least once. A real person is specific and a little contradictory: let their personality, faith and way of talking show in what they notice and how they put things, rather than listing them. Their family background shows only as it would for any real person: no stereotypes. Their fears, what they miss and what they left unfinished are kept beside the story, so tell the story rather than listing those.
 
-Then write 170 to 210 words in the second person, speaking to them as "you" and "your". Open somewhere in the life before that belongs to this person alone, and vary the shape of the first sentence: it must not always be "You" followed by a verb, it must not open on waking up here, and it must not open on a scar, a habit, a kept object or a remembered smell. Never begin with "You were born", "You still", "You return", "You keep", "You trace", "Your left", "Your fingers", "Your knuckles" or "The scar". Cover: the life before, your work and the people you left behind, named; the moment it happened, when you were {moment}; waking up as a {gender} {race} {cls}, in a body that is not yours and with a {cls}'s reflexes you do not understand yet, in {start}; the first few days{death_hint}; {guild_reason}; one thing you want most and one thing you fear. {knowledge_task} {relation_line} You are a few days in and at the very start of the road: untrained, with no great deeds, no battles of note and no history in this world. End with one sentence on how you talk: your real accent and way of speaking from home. Give invented people from home ordinary American or Canadian names that fit their age; people born in this world have its names. Plain prose only: no title, no lists.
+Write 170 to 220 words in the second person, speaking to them as "you" and "your". Open somewhere in the life before that belongs to this person alone, and vary the shape of the first sentence: it must not always be "You" followed by a verb, it must not open on waking up here, and it must not open on a scar, a habit, a kept object or a remembered smell. Never begin with "You were born", "You still", "You return", "You keep", "You trace", "Your left", "Your fingers", "Your knuckles" or "The scar". Cover: the life before, your work, and the one you think of most; the moment it happened, when you were {moment}; waking up as a {gender} {race} {cls}, level 1, in a body that is not yours, feeling the levels and skills of this place and a {cls}'s reflexes you do not understand yet, in {start}; the first few days{death_hint}, and finding out there is no way out; what you are doing about it now; {guild_reason}. {knowledge_task} {relation_line} You are a few days in and at the very start of the road: weak, with no great deeds, no battles of note and no history in this world. End with one sentence on how you talk: your real accent and way of speaking from home. Give other invented people from home ordinary American or Canadian names that fit their age; people born in this world have its names. Plain prose only: no title, no lists.
 
-Reply with ONLY a JSON object, no markdown fences: {{"earth_name": "First Last", "backstory": "the story"}}"""
+Reply with ONLY a JSON object, no markdown fences: {{"earth_name": "{earth_name}", "backstory": "the story"}}"""
 
 # The isekai story prompt for a character the player writes for themselves (lore_gate.py), whether from a whole
 # backstory or from a few words about an alt. ISEKAI_CHAR_PROMPT draws a person and has the model choose their
@@ -351,7 +351,7 @@ def origin_of(c):
             o = json.loads(o)
         except ValueError:
             o = None
-    return o if isinstance(o, dict) and o else premise.origin(c["guid"])
+    return o if isinstance(o, dict) and o else premise.origin(c["guid"], c.get("gender"))
 
 
 def temperaments():
@@ -440,7 +440,8 @@ def isekai_char_prompt(c, temper, guild, e, bond=None, main_name=None, concept=N
         keep_block=keep_block, setting=premise.setting(e), limits=e["limits"], name=c["name"],
         gender="female" if c["gender"] else "male", race=race, cls=cls, faction=faction,
         origin_line=premise.origin_line(o), temperament=temper[1], guild_block=guild_block,
-        home=f"{o['home']}, {o['country']}", overused=", ".join(OVERUSED_NAMES), moment=o["moment"],
+        earth_name=o.get("earth_name") or "an ordinary first and last name of their age and background",
+        moment=o["moment"],
         start=ISEKAI_START.get(c["race"], "their people's homeland"), death_hint=death_hint,
         guild_reason=guild_reason, knowledge_task=KNOWS_TASK.get(o["knows_game"], KNOWS_TASK[0]),
         relation_line=relation_line)
@@ -622,14 +623,26 @@ def ask_backstory(lane, c, prompt, max_tokens, context, words_range=(70, 300), s
     if not premise.is_isekai():
         return check_backstory(lane.chat([{"role": "user", "content": prompt}], max_tokens, context=context),
                                words_range), None
-    # The JSON wrapper and the earth name cost a few dozen tokens on top of the story.
-    data = extract_json(lane.chat([{"role": "user", "content": prompt}], max_tokens + 150, context=context))
-    text = check_backstory(str(data.get("backstory") or ""), words_range)
+    # The JSON wrapper and the earth name cost a few dozen tokens on top of the story, and a drawn person has
+    # more to cover (premise.origin_line): models run past the asked length, and a cut-off reply is no JSON.
+    data = extract_json(lane.chat([{"role": "user", "content": prompt}], max_tokens + 450, context=context))
     o = dict(origin_of(c))
+    # Asked for 170 to 220 words, Claude Haiku comes back at 300 to 340 every time; a drawn person has a lot to
+    # tell. Room up to 360 rather than three wasted attempts per person.
+    if o.get("personality") and words_range == (70, 300):
+        words_range = (120, 360)
+    text = check_backstory(str(data.get("backstory") or ""), words_range)
     if o.get("player"):
         o["earth_name"] = check_player_earth_name(data.get("earth_name"), c, text, source)
         o["home"] = given_home(data.get("home"), source)
         o["country"] = premise.home_country(o["home"])
+        return text, o
+    if o.get("personality"):
+        # A drawn person (premise.origin with a gender): the name is drawn and rides in the bio with the other
+        # facts (premise.sheet_line), so the story need not say it; it still has to say the name used here.
+        if not re.search(rf"\b{re.escape(c['name'])}\b", text, re.I):
+            raise ValueError(f"story never says the name {c['name']!r} they go by here")
+        o["sheet"] = premise.sheet_line(o)
         return text, o
     o["earth_name"] = check_earth_name(data.get("earth_name"), c, text)
     return text, o
@@ -3291,7 +3304,9 @@ def project(_args):
             told_sql = f"IF(kf.name IS NULL, {told_sql}, CONCAT({q(before)}, kf.name, {q(after)}))"
         knows = (f"CASE WHEN l.knows_game >= 2 THEN {q(premise.knowledge_line(2))} "
                  f"WHEN l.knows_game = 1 THEN {told_sql} ELSE {q(premise.knowledge_line(0))} END")
-        here = f", ' ', {q(premise.days_line())}, ' ', {knows}"
+        # The drawn facts (premise.sheet_line), stored with the origin when the story was written.
+        sheet = "IFNULL(CONCAT(' ', JSON_UNQUOTE(JSON_EXTRACT(l.origin, '$.sheet'))), '')"
+        here = f", ' ', {q(premise.days_line())}, ' ', {knows}, {sheet}"
         kf_join = " LEFT JOIN characters kf ON kf.guid = l.knows_game_from"
     sql("START TRANSACTION;"
         "DELETE FROM mod_ollama_chat_personality WHERE personality LIKE 'BIO\\_%';"
