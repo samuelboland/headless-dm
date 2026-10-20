@@ -34,6 +34,12 @@ and caps bodies at 1024 bytes, which is why this is a separate door):
   POST /voice-decline        throw a candidate away
   POST /voice-line           one line said in their locked voice, cached forever
   POST /voice-export         a section's recorded lines as a zip: files, two mixed tracks, subtitles
+  GET  /people               everyone with a story, light (isekai only): the People panel's list
+  GET  /person?guid=         one person closely: who they were, story, talk, feelings, notices sent
+  POST /guide-draft          a system message for one person, written and checked. STORES NOTHING
+  POST /guide-send           send a draft by its id (never text posted back), then rebuild bios. Returns a job
+  POST /guide-takeback       undo a sent message as far as it can be undone. Returns a job
+                             The three POSTs are off unless GUIDANCE_ENABLED=1 (services/lore/guidance.py)
   GET  /models               which model each backend is told and each route's backends, in order; whether
                              each key is set (never the key); whether the router has picked it up
   POST /models-set           change a backend's model name, or the order of a route's backends. Nothing else:
@@ -81,6 +87,7 @@ from common import fleet_admin  # noqa: E402
 sys.path.insert(0, os.path.join(REPO, "services", "chronicler"))
 import journey_story as js  # noqa: E402
 import voices               # noqa: E402
+import guidance             # noqa: E402  (the People panel: follow one person, send a system message)
 
 def _site(key, default):
     """A gate setting: the environment first (systemd passes site.env through), then site/ itself,
@@ -758,6 +765,17 @@ def keep_alt(job, char, src, concept):
             + ("" if told else " Run `.ollama reload` on the world's console for them to know it."))
 
 
+_drafts = {}                 # guidance drafts by id: a send takes the draft the gate wrote, never posted text
+_reproject_lock = threading.Lock()
+
+
+def _reproject():
+    """Rebuild the bios and reload them, as awareness.py does. One at a time: the GM console serves one."""
+    import awareness
+    with _reproject_lock:
+        return awareness.reproject()
+
+
 def reload_prompts(job):
     """Tell the running world to re-read the templates. Best effort: the gate holds no console of its own."""
     script = os.environ.get("LORE_GATE_RELOAD", os.path.join(REPO, "ops", "scripts", "ra.sh"))
@@ -865,6 +883,19 @@ class Handler(BaseHTTPRequestHandler):
                                         "Stories are written for your own characters and their alts."})
             return self._send(200, {"ok": True, "character": who["name"], "guid": int(guid),
                                     "legs": js.legs_doc(int(guid))})
+        if self.path.startswith("/people"):
+            if not g.premise.is_isekai():
+                return self._send(404, {"ok": False, "message": "People are followed only on an isekai realm."})
+            return self._send(200, {"ok": True, "people": guidance.people(), "days": g.premise.days_here(),
+                                    "guidance": guidance.enabled()})
+        if self.path.startswith("/person"):
+            guid = (self._query().get("guid") or [""])[0]
+            if not guid.isdigit() or not g.premise.is_isekai():
+                return self._send(400, {"ok": False, "message": "Say who, by guid."})
+            p = guidance.person(int(guid))
+            if not p:
+                return self._send(404, {"ok": False, "message": "Nobody with a story has that guid."})
+            return self._send(200, {"ok": True, "person": p, "guidance": guidance.enabled()})
         if self.path.startswith("/voice"):
             q = self._query()
             return self._voice(lambda: voices.state(voices.resolve(
@@ -900,6 +931,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._journey_write(body)
         if self.path.startswith("/voice-"):
             return self._voice_post(body)
+        if self.path.startswith("/guide-"):
+            return self._guide(body)
 
         name = str(body.get("character", "")).strip()
         what = str(body.get("what", "")).strip()
@@ -1106,6 +1139,71 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- the story of a journey (plan 53) -----------------------------------
 
+    # -- guidance: a system message to one person (services/lore/guidance.py) ----------------------------
+
+    def _guide(self, body):
+        if not guidance.enabled():
+            return self._send(403, {"ok": False, "message": "Guidance is off. GUIDANCE_ENABLED=1 in site.env turns it on."})
+        path = urlparse(self.path).path
+        if path == "/guide-draft":
+            guid = str(body.get("guid", ""))
+            if not guid.isdigit():
+                return self._send(400, {"ok": False, "message": "Say who, by guid."})
+            text = str(body.get("text", "")).strip()
+            if not text:
+                return self._send(400, {"ok": False, "message": "Write what the window should achieve."})
+            with _gate_lock:
+                key = ("guide", int(guid))
+                if key in _busy:
+                    return self._send(429, {"ok": False, "message": "A message for them is already being written."})
+                if time.time() - _last_call.get(key, 0) < MIN_SECONDS_BETWEEN:
+                    return self._send(429, {"ok": False, "message": "Give it a moment before trying again."})
+                _busy.add(key)
+                _last_call[key] = time.time()
+            try:
+                d, why = guidance.draft(int(guid), str(body.get("kind", "free")), text, _lanes()[0], ERA)
+            finally:
+                with _gate_lock:
+                    _busy.discard(key)
+            if not d:
+                return self._send(400, {"ok": False, "message": why})
+            d["id"] = f"d{guid}-{int(time.time() * 1000)}"
+            with _jobs_lock:
+                _drafts[d["id"]] = d
+                for old in [k for k, v in _drafts.items() if time.time() - int(k.split("-")[1]) / 1000 > JOB_KEPT_SECONDS]:
+                    _drafts.pop(old, None)
+            log(f"guidance draft {d['id']} for {d['name']}: {d['notice']!r}")
+            return self._send(200, {"ok": True, "draft": d})
+        if path in ("/guide-send", "/guide-takeback"):
+            with _jobs_lock:
+                d = _drafts.pop(str(body.get("draft", "")), None) if path == "/guide-send" else None
+            if path == "/guide-send" and not d:
+                return self._send(404, {"ok": False, "message": "That draft is forgotten or already sent. Write it again."})
+            gid = str(body.get("id", ""))
+            if path == "/guide-takeback" and not gid.isdigit():
+                return self._send(400, {"ok": False, "message": "Say which message, by id."})
+            char = {"guid": int(d["guid"]) if d else 0, "name": d["name"] if d else f"message {gid}"}
+            job = _new_job(char, "guide")
+            with _gate_lock:
+                _busy.add(job["guid"])
+
+            def run(job):
+                if d:
+                    job["guidance_id"] = guidance.send(d)
+                    _step(job, f"The window opened before {d['name']}.")
+                else:
+                    back = guidance.take_back(int(gid))
+                    if not back:
+                        return _finish(job, "failed", "That message is not one that can be taken back.")
+                    _step(job, "Taken back" + ("; " + "; ".join(back[1]) if back[1] else "") + ".")
+                _step(job, "Rebuilding the bios.")
+                ok = _reproject()
+                _finish(job, "done", "They carry it now." if ok and d else "It is gone from them now." if ok else
+                        "Stored, but the bios were not rebuilt; the next awareness pass will do it.")
+            _start(job, run)
+            return self._send(200, {"ok": True, "job": job["id"]})
+        return self._send(404, {"ok": False, "message": "No such door."})
+
     def _journey_write(self, body):
         """Write up one journey. Long, so it answers with a job the page watches, exactly as the
         alt flow does; the writing itself happens off the request thread."""
@@ -1221,6 +1319,10 @@ def main():
     except Exception as err:                    # noqa: BLE001
         log(f"voices: could not be set up, so they stay off: {err!r}")
         voices.disable(repr(err))
+    if g.premise.is_isekai():
+        guidance.ensure_schema()
+        log("guidance: " + ("on (POST /guide-draft, /guide-send, /guide-takeback)" if guidance.enabled()
+                            else "off (GUIDANCE_ENABLED=1 lets the People panel send system messages)"))
     log(f"writing for accounts: {ACCOUNTS or allowed_accounts()}")
     log("model settings: " + ("on (GET /models, POST /models-set)" if MODEL_SETTINGS
                               else "off (MODEL_SETTINGS_ENABLED=1 turns the panel on)"))

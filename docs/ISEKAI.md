@@ -95,6 +95,39 @@ Every change is in the `awareness_event` table, so you can watch the word travel
 
 No chat prompt says the world is a game. If one did, every bot would know it at once and nothing would spread.
 
+### Following someone, and guiding them
+
+The dashboard's People panel lists every arrival with who they were back home, and opens one person closely:
+- their drawn facts and story;
+- what drives them;
+- what they have said;
+- who they feel strongly about;
+- what they remember;
+- how the word about the game reached them.
+
+It reads through the lore gate, so it asks for the gate's token the way the Lore panel does.
+
+From there you can send them a **system message**. It is a window that opens before them, the way the system
+speaks in Sword Art Online. Only they can see it, and it has no named sender.
+
+What you type is your intent, not the window's text. A model (`services/lore/guidance.py`) writes three things:
+- the window's words;
+- how this person takes it, true to who they are;
+- what it changes, depending on the kind of message.
+
+The kinds of message, and what each changes:
+- **What drives them:** their goal (`lore_character.motivation*`).
+- **Something to know:** a line in their story.
+- **How they feel about someone:** a warmer or colder feeling, plus a clause the chat module adds whenever that
+  person comes up.
+- **Free:** whichever of those your words call for.
+
+Every message is a draft first, and nothing is stored until you send it. Sending writes the window and the
+reaction into their story (`lore_character_note`, source `guidance`), then rebuilds and reloads the bios. Every
+sent message can be taken back from the same page. A goal changed again since is left alone.
+
+The record is in the `guidance` table. `GUIDANCE_ENABLED=1` turns sending on; reading people needs nothing.
+
 ---
 
 ## Setting it up
@@ -183,6 +216,7 @@ The dry run needs the awareness tables, so run `--once` for real at least once b
 | `AWARENESS_ENABLED` | `0` | The spreading service; off unless 1 |
 | `AWARENESS_CHANCE_FIRSTHAND` | `0.25` | Chance a player of the game tells someone per meeting |
 | `AWARENESS_CHANCE_SECONDHAND` | `0.10` | Chance someone who only heard it passes it on |
+| `GUIDANCE_ENABLED` | `0` | The People panel may send system messages; off unless 1 |
 
 Kill switches for the spreading service: `AWARENESS_ENABLED=0`, `systemctl --user stop wow-awareness`, or a file named
 `PAUSE` beside `services/lore/awareness.py`.
