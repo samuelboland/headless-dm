@@ -430,6 +430,8 @@ def publish():
     doc = full_doc()
     # Tells the dashboard whether to show the Models panel at all. Off unless the operator turned it on.
     doc["model_settings"] = MODEL_SETTINGS
+    # Tells it whether there are arrivals to follow: the People panel shows only on an isekai realm.
+    doc["people"] = g.premise.is_isekai()
     os.makedirs(os.path.dirname(EDIT_JSON), exist_ok=True)
     with open(EDIT_JSON + ".tmp", "w") as f:
         json.dump(doc, f, separators=(",", ":"))
