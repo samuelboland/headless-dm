@@ -31,6 +31,7 @@ _SERVICES = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 sys.path.insert(0, os.path.join(_SERVICES, "lore"))
 import era as eras  # noqa: E402
 import fleet  # noqa: E402
+import gen_backstories as gb  # noqa: E402  (get_era: the isekai word filter, era.get otherwise)
 
 # Where this realm lives now comes from site/, with the live server config as the fallback (plan 23 W1).
 sys.path.insert(0, _SERVICES)
@@ -204,7 +205,9 @@ def sessions(args):
 
 
 MEMORY_LINE = re.compile(r"^\s*(?:(\d{1,2})\s*\|\s*)?(.+?)\s*$")
-ERA = eras.get(site.get("ERA", "classic"))   # site.env, not a second env var of its own (plan 23 W8)
+# site.env, not a second env var of its own (plan 23 W8). get_era is era.get unchanged on the native premise; under
+# isekai its word filter lets a person say "level", "game" or "server" and catches a life longer than a few days here.
+ERA = gb.get_era(site.get("ERA", "classic"))
 
 
 def parse_memories(text):

@@ -30,6 +30,8 @@ import sys
 import regard as rg  # also puts /opt/wow/lore on the path
 import era as eras  # noqa: E402
 import fleet  # noqa: E402
+import gen_backstories as gb  # noqa: E402
+from common import premise  # noqa: E402
 
 log = rg.log
 sql, q = rg.sql, rg.q
@@ -50,6 +52,13 @@ LORE_PROMPT = """These lines are from the life story of {writer}, told to them i
 
 How does {writer} feel about {named} now? Reply with JSON only:
 {{"feels": <a whole number from -40 (hatred, fear, bitter rivalry) to 40 (deep trust, love, gratitude)>, "thought": "one sentence of at most 25 words in the second person: how you feel about {named} and why. In-world, no numbers."}}"""
+
+
+if premise.is_isekai():
+    # The story is an arrival's, so the people it names are fellow arrivals and "in-world" would forbid the
+    # very things the story is about.
+    LORE_PROMPT = LORE_PROMPT.replace("who rides in the same company", "who is in the same band of arrivals").replace(
+        "In-world, no numbers.", "Plain words, no numbers.")
 
 
 def spread(text, width):
@@ -77,13 +86,17 @@ def fellowship_score(gid, a, b):
         score += SAME_TEMPERAMENT
     if a[3] and a[3] == b[3]:
         score += SAME_MOTIVATION
-    reason = "sworn to the same company"
+    # Under isekai the company is a band of arrivals days old, not an oath-bound order.
+    isekai = premise.is_isekai()
+    reason = "in the same band of arrivals" if isekai else "sworn to the same company"
     if outsider(gid, ga):
         score += OUTSIDER_OUT
-        reason = "you have never quite belonged among the company"
+        reason = ("you have never quite felt at home in the band" if isekai
+                  else "you have never quite belonged among the company")
     elif outsider(gid, gb):
         score += OUTSIDER_IN
-        reason = "they have never quite fit in with the company"
+        reason = ("they have never quite fit in with the band" if isekai
+                  else "they have never quite fit in with the company")
     return max(-100.0, min(100.0, float(score))), reason
 
 
@@ -149,7 +162,7 @@ def lore_jobs():
 
 def lore(args):
     # Was eras.get("classic"), which ignored --era outright: asking for another era ran Classic anyway.
-    e = eras.get(getattr(args, "era", None) or rg.site.get("ERA", "classic"))
+    e = gb.get_era(getattr(args, "era", None) or rg.site.get("ERA", "classic"))
     jobs = lore_jobs()
     if args.limit:
         jobs = jobs[:args.limit]

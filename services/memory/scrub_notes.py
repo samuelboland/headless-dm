@@ -28,6 +28,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from recall import MODULE_CONF, log, sql  # noqa: E402
+from common import premise  # noqa: E402
 
 # The module's default for OllamaChat.Memory.SystemPrompt, used when the conf does not set one.
 MEMORY_SYSTEM_DEFAULT = ("You keep short notes of what really happened. Write only what the lines you are given "
@@ -40,6 +41,10 @@ DANGLING = set("the a an of to and or but in on at by for from with into onto hi
 # "no army sailed for Northrend" and "the Dark Portal lay dead and closed"; before plan 58 no memory writer
 # could have met Northrend in this era except through that prompt, so every mention of it is the prompt.
 FRAMING = re.compile(r"northrend|dead and closed|beyond this time", re.I)
+if premise.is_isekai():
+    # Northrend is not the system prompt's claim about the era here: a person who played the game may name it
+    # as something the game had, and the memory is theirs. The other two phrases are still the prompt's.
+    FRAMING = re.compile(r"dead and closed|beyond this time", re.I)
 CLOSERS = ('.', '!', '?', '"', "'", ')', '”', '’', '…')
 
 
@@ -73,6 +78,11 @@ def scaffolding(paths):
     for p in prompts:
         for piece in re.split(r"\{[^}]*\}", p):   # placeholders are what was given, not what was asked
             out |= shingles(piece)
+    if premise.is_isekai():
+        # The premise text sits in the system prompt, and "woke up in Azeroth in a body that is not theirs" is
+        # also what a person truly remembers about themselves. A note sharing four words with it is as likely
+        # a real memory as an echo, so those runs do not count as scaffolding; every other run still does.
+        out -= shingles(premise.PREMISE_TEXT)
     return out
 
 

@@ -37,6 +37,8 @@ import regard as rg  # also puts /opt/wow/lore on the path
 import era as eras  # noqa: E402
 import fleet  # noqa: E402
 from gen_backstories import OVERUSED_NAMES, OVERUSED_RE  # noqa: E402
+import gen_backstories as gb  # noqa: E402
+from common import premise  # noqa: E402
 from lands import LAND_NOTES, ZONES
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -73,6 +75,11 @@ HOSTILE = ("enemies", "rivals")
 
 PREAMBLE = ("You are a loremaster for {setting} Everything you write is real history to the people in it. "
             "Never mention games, players, levels as numbers, zones, servers or anything outside the world.")
+if premise.is_isekai():
+    # The companies are bands of arrivals that formed in the last few days (founding.py, gen_backstories.py), so
+    # the real world is allowed and any history older than those days is not.
+    PREAMBLE = ("{setting} The companies below are bands of these arrivals, formed in the last few days: nothing "
+                "between them or in their past in this world is older than that.")
 
 SEAT_PROMPT = PREAMBLE + """
 
@@ -153,15 +160,23 @@ def companies(e):
                  faction="Horde" if 2 * int(r[4]) > int(r[5]) else "Alliance") for r in rows]
 
 
+def setting_of(e):
+    """The setting line a prompt opens with: the era's, or under isekai the premise then the era's Azeroth."""
+    return premise.setting(e) if premise.is_isekai() else e["setting"]
+
+
 def vet(text, e, judge, attempt, label):
-    """Raise to retry; on the last attempt a judge flag is recorded for review instead."""
-    bad = e["meta"].search(text)
+    """Raise to retry; on the last attempt a judge flag is recorded for review instead.
+
+    e comes from gen_backstories.get_era, so under isekai both the word filter and the judge's question are
+    the isekai ones; native, they are era.py's as before."""
+    bad = gb.meta_for(e).search(text)
     if bad:
         raise ValueError(f"out-of-world term: {bad.group(0)!r}")
     name = OVERUSED_RE.search(text)
     if name:
         raise ValueError(f"overused name {name.group(0)!r}")
-    evidence = judge.check(eras.judge_prompt(e, text)) if judge else None
+    evidence = judge.check(gb.judge_prompt(e, text)) if judge else None
     if not evidence:
         return
     if attempt < fleet.MAX_ATTEMPTS:
@@ -219,7 +234,7 @@ def propose(lane, attempt, e, judge, g, asks):
                      + "\n".join(f"- {z[1]}: {LAND_NOTES[z[0]]}" for z in lands))
         item = '{"land": "a name exactly as listed", "hold": "one sentence of 12 to 30 words: what the company keeps there and why"}'
         shape.append(f'"{band[0]}": [' + ", ".join([item] * n) + "]")
-    prompt = SEAT_PROMPT.format(setting=e["setting"], faction=g["faction"], name=g["name"], charter=g["charter"],
+    prompt = SEAT_PROMPT.format(setting=setting_of(e), faction=g["faction"], name=g["name"], charter=g["charter"],
                                 history=g["history"], asks="\n".join(lines), shape=", ".join(shape))
     raw = extract_json(lane.chat([{"role": "user", "content": prompt}], 250 + 150 * sum(n for *_, n in asks),
                                  temperature=0.8,
@@ -347,7 +362,7 @@ def relation_prompt(e, ga, gb, disposition, zones):
         ground = f"Both keep seats in {' and '.join(z[1] for z in zones)}, so their people cross paths there."
     else:
         ground = f"Both serve the {ga['faction']}, and their people cross paths on the road."
-    return RELATION_PROMPT.format(setting=e["setting"], a=ga["name"], fa=ga["faction"], ca=ga["charter"],
+    return RELATION_PROMPT.format(setting=setting_of(e), a=ga["name"], fa=ga["faction"], ca=ga["charter"],
                                   ha=ga["history"], b=gb["name"], fb=gb["faction"], cb=gb["charter"],
                                   hb=gb["history"], ground=ground, disposition=DISPOSITIONS[disposition][1],
                                   overused=", ".join(OVERUSED_NAMES))
@@ -402,7 +417,7 @@ def seed_relations(e, lanes, judge, guilds, placed, rng):
 # commands
 
 def seed(args):
-    e = eras.get(args.era)
+    e = gb.get_era(args.era)
     if e["name"] not in ZONES:
         sys.exit(f"no lands defined for era {e['name']}")
     ensure_schema()
@@ -436,7 +451,7 @@ def seed(args):
 
 
 def sample(args):
-    e = eras.get(args.era)
+    e = gb.get_era(args.era)
     zones = ZONES[e["name"]]
     wanted = [int(x) for x in args.guilds.split(",")]
     guild_by = {g["guildid"]: g for g in companies(e)}
@@ -526,7 +541,7 @@ PLAIN_RANKS = {"guild master", "master", "leader", "officer", "veteran", "member
 def build_ranks(lane, attempt, e, judge, g, taken):
     # Member roles are left out: the models turn a particular member's description into a title. Titles other
     # companies hold are named in the prompt: a rejection afterwards alone never broke the models of their favourites.
-    prompt = RANKS_PROMPT.format(setting=e["setting"], name=g["name"], faction=g["faction"], charter=g["charter"],
+    prompt = RANKS_PROMPT.format(setting=setting_of(e), name=g["name"], faction=g["faction"], charter=g["charter"],
                                  history=g["history"], taken=", ".join(sorted(taken)) or "none yet")
     raw = extract_json(lane.chat([{"role": "user", "content": prompt}], 200, temperature=0.8,
         context={
@@ -561,7 +576,7 @@ def store_ranks(guildid, titles, lane, e):
 
 
 def ranks(args):
-    e = eras.get(args.era)
+    e = gb.get_era(args.era)
     rg.sql(open(os.path.join(HERE, "company_tables.sql")).read(), fetch=False)
     wanted = {int(x) for x in args.guilds.split(",")} if args.guilds else None
     guilds = [g for g in companies(e) if wanted is None or g["guildid"] in wanted]

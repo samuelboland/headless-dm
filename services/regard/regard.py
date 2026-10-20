@@ -45,6 +45,7 @@ import urllib.request
 _SERVICES = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 sys.path.insert(0, os.path.join(_SERVICES, "lore"))
 import era as eras  # noqa: E402
+import gen_backstories as gb  # noqa: E402  (get_era: the isekai word filter and setting, era.get otherwise)
 import fleet  # noqa: E402
 import lands  # noqa: E402
 import areas  # noqa: E402  (beside this file, not in /opt/wow/lore: area names out of AreaTable.dbc)
@@ -54,6 +55,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # realpath, not HERE: HERE is the symlinked /opt/wow/regard, whose parent is /opt/wow (plan 23 W1).
 sys.path.insert(0, _SERVICES)
 from common import site  # noqa: E402
+from common import premise  # noqa: E402
 
 _DASH = os.path.join(site.get("DATA_DIR", "/opt/wow/server/data"), "dashboard-data")
 SNAPSHOT = os.path.join(_DASH, "regard.json")
@@ -840,6 +842,15 @@ Write the one thing you say to {player} as it is done, at most 25 words. Plain w
 ACTION_OWN_PROMPT = """You are {speaker}, {speaker_desc} living in Azeroth.
 {situation}
 Write the one thing you say to {player}, at most 25 words. Plain words in your own voice, no quotes, no numbers, nothing outside the world."""
+if premise.is_isekai():
+    # The people speaking are arrivals, and a company is a band of them days old. They may speak of home; the
+    # filter (meta, from gen_backstories.get_era) still turns away a life in Azeroth longer than those days.
+    ACTION_PROMPT = """You are one of those who lead {company}, a band of people who woke up in Azeroth a few days ago. {charter}
+{situation}
+Write the one thing you say to {player} as it is done, at most 25 words. Plain words in your own voice, no quotes, no numbers."""
+    ACTION_OWN_PROMPT = """You are {speaker}, {speaker_desc} who is really an ordinary person from the United States or Canada and woke up in Azeroth a few days ago in this body.
+{situation}
+Write the one thing you say to {player}, at most 25 words. Plain words in your own voice, no quotes, no numbers."""
 OWN_VOICE = {"leave", "whisper"}
 ACTION_SITUATION = {
     "invite": "Your people have come to trust {player}, who is not yet one of you, and you are asking them to join the company.",
@@ -1516,6 +1527,12 @@ Two people meet {place} and fall to talking, with no one else listening.
 {news}
 Write their conversation: {n} lines, taking turns, starting with {first}. Vary how long the lines run: most are a handful of words, and only a few reach twenty or more, when someone actually has something to say. Write each in the speaker's own voice and manner. They talk as people do: the day, their work or company, the land, what drives them, or each other. Let what each feels about the other show. Vary how the lines open, and keep the weather out of it: no line beginning "The wind here", "The earth here" or "The silence", and none ending by asking "don't you?" or "isn't it?". No narration, no numbers, nothing outside the world.
 Reply with JSON only: {{"lines": [{{"speaker": "{first}", "text": "..."}}]}}"""
+if premise.is_isekai():
+    # Two arrivals talking: home, what they left, what happened to them and what the other knows are all fair.
+    TALK_PROMPT = TALK_PROMPT.replace(
+        "the day, their work or company, the land, what drives them, or each other.",
+        "the day, home and the people they left, what happened to them, their work or band, the land, what drives them, or each other.").replace(
+        "No narration, no numbers, nothing outside the world.", "No narration, no numbers.")
 _TALK_TIMES = []   # when conversations were written this hour
 _TALK_PAIRS = {}   # (lower guid, higher guid) -> when they last talked (or were tried)
 
@@ -1575,7 +1592,7 @@ def write_talk(a, b, pa, pb, feel, e, meta, names):
         return talk_block(p, other["name"], feel.get((p["guid"], other["guid"])), lore.get(p["guid"], ("", "", "")),
                           names.get(p["guild"]), gender, level, e)
 
-    prompt = TALK_PROMPT.format(setting=e["setting"], place=place, a_block=block(pa, pb), b_block=block(pb, pa),
+    prompt = TALK_PROMPT.format(setting=premise.setting(e) if premise.is_isekai() else e["setting"], place=place, a_block=block(pa, pb), b_block=block(pb, pa),
                                 news=f"\nWhat is said in these parts: {chr(9).join(news[0])}\n" if news else "",
                                 n=random.randint(4, 6), first=first["name"])
     result = {}
@@ -1763,6 +1780,13 @@ No numbers, nothing outside the world. Leave out small talk that changes nothing
 Reply with JSON only: {{"moments": [{{"line": 1, "speaker": "Name", "target": "Name", "target_feels": 0, "speaker_feels": 0, "why": "...", "speaker_why": "...", "what": "..."}}]}}"""
 
 
+if premise.is_isekai():
+    JUDGE_PROMPT = JUDGE_PROMPT.replace(
+        "These words were spoken aloud in Azeroth, in this order.",
+        "These words were spoken aloud in Azeroth by people who woke up there a few days ago from the real world, in this order.").replace(
+        "No numbers, nothing outside the world. Leave", "No numbers. Leave")
+
+
 def moment_words(mo, speaker, target, meta):
     """The judge's three tellings of a moment: how the person spoken to remembers it and how the speaker does (each
     goes into that one's own regard reason, so prompts read "since they mocked your candlelight"), and a bystander's,
@@ -1929,6 +1953,13 @@ What passed between them, most recent first:
 {moments}
 
 Write ONE sentence of at most 30 words, in the second person ("You ..."), saying how you feel about {other} and why. Plain words, no quotes. Nothing outside the world: no numbers, no game terms."""
+
+
+if premise.is_isekai():
+    DESCRIBE_PROMPT = DESCRIBE_PROMPT.replace(
+        "{name}, a {race} {cls} living in Azeroth.",
+        "{name}, a {race} {cls} who is really an ordinary person from the United States or Canada and woke up in Azeroth a few days ago.").replace(
+        "Nothing outside the world: no numbers, no game terms.", "No numbers.")
 
 
 def describe(meta):
@@ -2950,7 +2981,7 @@ def cycle(args, judge, meta):
         log(f"judge unreachable, chat waits for the next cycle: {e}")
 
     talked = Changes()   # plan 18 P8c
-    n_talk = bot_talk(talked, positions, judge, eras.get(args.era), meta, names)
+    n_talk = bot_talk(talked, positions, judge, gb.get_era(args.era), meta, names)
     commit(talked, people(talked.guids()))
     words_incidents(talked, incidents, names)
 
@@ -3021,7 +3052,7 @@ def main():
         log(f"journeys: {written} files rewritten in {time.time() - t0:.1f}s")
         return 0
 
-    meta = eras.get(args.era)["meta"]
+    meta = gb.get_era(args.era)["meta"]
     # The judge's address lives in site/fleet.toml, not in three files that could disagree (23 W3).
     _j = fleet._fleet.judge()
     judge = fleet.Lane.of(_j, JUDGE_SLOTS, timeout=90)

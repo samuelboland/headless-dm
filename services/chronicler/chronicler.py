@@ -45,12 +45,14 @@ sys.path.insert(0, os.path.join(_SERVICES, "lore"))
 sys.path.insert(0, os.path.join(_SERVICES, "regard"))
 import era as eras  # noqa: E402
 import fleet  # noqa: E402
+import gen_backstories as gb  # noqa: E402  (get_era: the isekai word filter, era.get otherwise)
 import regard as rg  # noqa: E402  (database helpers, people, lands, company names)
 import overheard  # noqa: E402  (the dashboard's Rumours: where tales went, and who passed them on)
 
 # Where this realm lives comes from site/, with the live server config as the fallback (plan 23 W1).
 sys.path.insert(0, _SERVICES)
 from common import site  # noqa: E402
+from common import premise  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SNAPSHOT = os.path.join(site.get("DATA_DIR", "/opt/wow/server/data"), "dashboard-data", "chronicle.json")
@@ -536,6 +538,23 @@ def attempt_on(lanes, attempt):
     return usable[(attempt - 1) % len(usable)]
 
 
+def rumour_era(e):
+    """The era a rumour is checked against. Rumours reach the bots' prompts, so under isekai they get the isekai
+    word filter and judge (gen_backstories.get_era, premise.judge_prompt); the day-book entries, which only the
+    dashboard reads, stay on the era as it is. Native: the same dict era.get gave."""
+    return gb.get_era(e["name"])
+
+
+def rumour_world(e):
+    """The world line a rumour prompt states: under isekai the premise first, so the news is told by and to
+    people who know the arrivals are here."""
+    return premise.setting(e) if premise.is_isekai() else e["setting"]
+
+
+def rumour_judge_prompt(e, text, known):
+    return premise.judge_prompt(e, text, 0, known) if premise.is_isekai() else eras.judge_prompt(e, text, known)
+
+
 def check_words(text, e):
     if e["meta"].search(text):
         raise ValueError(f"out-of-world word: {e['meta'].search(text).group(0)!r}")
@@ -605,7 +624,7 @@ def rumour_prompt(scribe, e, start, reports):
     enemy = SCRIBES[OTHER[scribe["key"]]]["faction"]
     lines = "\n".join(f"{i}. {'(word of the ' + enemy + ') ' if r['enemy'] else ''}{r['text']}"
                       for i, r in enumerate(reports, 1))
-    return (f"You help news travel in Azeroth. The world: {e['setting']}\n\n"
+    return (f"You help news travel in Azeroth. The world: {rumour_world(e)}\n\n"
             f"These things were reported among the {scribe['faction']} during {WATCH_SPAN[start.hour]}:\n{lines}\n\n"
             f"Pick up to {RUMOUR_REPORTS} of our own people's reports that ordinary folk would talk about most. For each, "
             "write two things people would say aloud:\n"
@@ -630,6 +649,7 @@ def write_rumours(scribe, e, start, reports, known, lanes, judge):
     placed = [r for r in reports if r["land"] in rg.LAND and r["rumour"]]
     if not placed:
         return []
+    e = rumour_era(e)
     messages = [{"role": "user", "content": rumour_prompt(scribe, e, start, placed)}]
     errors = []
     for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -661,7 +681,7 @@ def write_rumours(scribe, e, start, reports, known, lanes, judge):
                 kept.append(dict(kind=kind, origin=report["land"], near=near, far=far))
             if not kept:
                 raise ValueError("no usable rumours")
-            flag = judge.check(eras.judge_prompt(e, "\n".join(f"{t['near']}\n{t['far']}" for t in kept), known))
+            flag = judge.check(rumour_judge_prompt(e, "\n".join(f"{t['near']}\n{t['far']}" for t in kept), known))
             if flag:
                 if attempt < MAX_ATTEMPTS:
                     raise ValueError(f"judge: {flag}")
@@ -722,7 +742,7 @@ def retell_prompt(scribe, e, jobs):
         f"{rg.join_names([place_name(z) for z in j['here']], cap=9)}: \"{j['words']}\" "
         f"-> carried on to {rg.join_names([place_name(z) for z in j['onward']], cap=9)}"
         for i, j in enumerate(jobs, 1))
-    return (f"You help news travel in Azeroth. The world: {e['setting']}\n\n"
+    return (f"You help news travel in Azeroth. The world: {rumour_world(e)}\n\n"
             f"Word going around among the {scribe['faction']}, and where travellers carry it next:\n{lines}\n\n"
             "For each, write how it sounds one stop further along the road, after a few more mouths, as hearsay. "
             "Vary how it is attributed and do not begin them all the same way (\"a carter swore\", \"I had it from a "
@@ -737,6 +757,7 @@ def retell_prompt(scribe, e, jobs):
 def retell(scribe, e, jobs, lanes, judge):
     """{tale id: the retelling}. A telling the model botches is left out (its road ends); raises when no lane
     answered, so the tales wait for the next cycle."""
+    e = rumour_era(e)
     messages = [{"role": "user", "content": retell_prompt(scribe, e, jobs)}]
     known = set().union(*(names_in(j["words"]) for j in jobs))
     errors = []
@@ -762,7 +783,7 @@ def retell(scribe, e, jobs, lanes, judge):
                     kept[job["id"]] = words
             if not kept:
                 raise ValueError("no usable retellings")
-            flag = judge.check(eras.judge_prompt(e, "\n".join(kept.values()), known))
+            flag = judge.check(rumour_judge_prompt(e, "\n".join(kept.values()), known))
             if flag:
                 if attempt < MAX_ATTEMPTS:
                     raise ValueError(f"judge: {flag}")

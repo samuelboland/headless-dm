@@ -40,6 +40,7 @@ import era as eras  # noqa: E402
 import fleet  # noqa: E402
 import gen_backstories as gb  # noqa: E402
 import rivalry  # noqa: E402
+from common import premise  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 log = rg.log
@@ -70,6 +71,26 @@ Reply with ONLY a JSON object, no markdown fences:
   "charter": "the company's public description as it would be posted in an inn or muster hall, under 450 characters",
   "motto": "the founder's first word to the company, under 110 characters",
   "member_roles": {{"<each member name exactly as given>": "one sentence on their place or promise in the company"}}
+}}"""
+
+# The isekai form: the company is a band of arrivals who found each other days ago, as gen_backstories'
+# ISEKAI_GUILD_PROMPT has it, so the real world is allowed and a history in Azeroth is not.
+ISEKAI_FOUNDING_PROMPT = """{setting}{limits}
+
+A new {faction} band of these arrivals called "{name}" has just formed. {founder_line} put a charter before the people below, and they signed it {place}. Treat the name as given: it may be a joke someone made, a reference from back home, something a local misheard, or the first thing anyone suggested.
+
+What {founder} has done in these first days:
+{deeds}
+
+The first members, and why each followed {founder}:
+{roster}
+{heir}
+Reply with ONLY a JSON object, no markdown fences:
+{{
+  "history": "130 to 200 words: how {founder} and these first members found each other in the last few days, why they signed, what they are trying to do (get home, find their people, understand what happened, or just stay alive), and {guild_now}. It formed only days ago: it has no great victories, no reputation beyond the few people who have met them and holds no land yet. Keep to the deeds and reasons given; invent no battles or famous deeds.",
+  "charter": "the band's description as someone would post it for other arrivals to find, under 450 characters",
+  "motto": "the founder's first word to the band, under 110 characters",
+  "member_roles": {{"<each member name exactly as given>": "one sentence on their place or promise in the band so far"}}
 }}"""
 
 HEIR_BLOCK = """
@@ -171,6 +192,12 @@ def lore_prompt(ctx, e):
         roster.append(f"- {m['name']}: {'female' if m['gender'] else 'male'} {rg.RACES.get(m['race'], 'wanderer')} "
                       f"{rg.CLASSES.get(m['cls'], 'adventurer')}, {eras.standing(m['level'], e)}. In their own words: {why}")
     heir = HEIR_BLOCK.format(heir=ctx["heir"]["name"], history=ctx["heir"]["history"]) if ctx["heir"] and ctx["heir"]["history"] else ""
+    if premise.is_isekai():
+        return ISEKAI_FOUNDING_PROMPT.format(setting=premise.setting(e), limits=e["limits"], faction=ctx["faction"],
+                                             name=ctx["name"], founder_line=founder_line, place=ctx["place"],
+                                             founder=f["name"], deeds="\n".join(ctx["deeds"]),
+                                             roster="\n".join(roster) or "- (none named)", heir=heir,
+                                             guild_now="what it means to do next")
     return FOUNDING_PROMPT.format(setting=e["setting"], faction=ctx["faction"], name=ctx["name"], founder_line=founder_line,
                                   place=ctx["place"], founder=f["name"], deeds="\n".join(ctx["deeds"]),
                                   roster="\n".join(roster) or "- (none named)", heir=heir, guild_now=e["guild_now"])
@@ -187,7 +214,8 @@ def write_lore(lane, attempt, e, judge, ctx, store):
     history, charter, motto = (rivalry.clean(data.get(k)) for k in ("history", "charter", "motto"))
     names = {m["name"] for m in ctx["members"]} | {ctx["founder"]["name"]}
     roles = {k: rivalry.clean(v) for k, v in (data.get("member_roles") or {}).items() if isinstance(v, str) and k in names}
-    if not 110 <= len(history.split()) <= 280:
+    # The isekai band is days old and asked for 130 to 200 words, so a shorter floor fits it.
+    if not (80 if premise.is_isekai() else 110) <= len(history.split()) <= 280:
         raise ValueError(f"history has {len(history.split())} words")
     if not charter or not motto:
         raise ValueError("charter or motto missing")
@@ -429,7 +457,7 @@ def main():
     s.add_argument("--guild", type=int, required=True)
     args = ap.parse_args()
 
-    e = eras.get(args.era)
+    e = gb.get_era(args.era)   # the isekai checks under that premise, era.get untouched otherwise
     sql(open(os.path.join(HERE, "company_tables.sql")).read(), fetch=False)
     lanes, judge = rivalry.guild_lanes(), fleet.Judge()
     if args.cmd == "sample":
