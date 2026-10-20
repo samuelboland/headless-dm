@@ -11,6 +11,7 @@ patch) puts one rumour for the bot's land and faction into chatter and replies; 
 chronicle.json. Runs outside the worldserver as a user service and never touches game objects.
 
 Standing rule: bots are people living in Azeroth. Entries and rumours are in-world words with no figures.
+Under PREMISE=isekai the day-books are kept by arrivals in a modern voice (figures allowed in entries).
 
 A watch is four hours of the local clock (midnight, dawn, morning, midday, evening, nightfall). Operator
 decisions 2026-09-14: chronicle + rumours, two faction scribes, every few hours, a dashboard panel.
@@ -94,6 +95,30 @@ SCRIBES = {
                     "of wind riders, runners and wanderers"),
 }
 OTHER = {"A": "H", "H": "A"}
+
+# Under the isekai premise (services/common/premise.py) the day-books are kept by arrivals, ordinary people from
+# the United States and Canada, not by scribes born in Azeroth. Same keys, so every reader of SCRIBES works.
+ISEKAI_SCRIBES = {
+    "A": dict(name="Dana Whitcombe", about="a woman in her forties from Ohio who woke in Stormwind a few days ago "
+              "and, being a bookkeeper by trade, started writing down what she hears from the people coming "
+              "through the gates, because somebody ought to keep a record"),
+    "H": dict(name="Ray Kowalczyk", about="a man in his fifties from Michigan who woke in Orgrimmar a few days "
+              "ago and keeps a running journal of what he hears from the people coming through, because writing "
+              "it down is the only thing that steadies him"),
+}
+ISEKAI_PERSONAL = dict(name="Priya Raman", faction="",
+    about="a woman in her thirties from Ontario who woke in Booty Bay a few days ago and keeps a notebook on "
+          "a handful of fellow arrivals she has ended up watching out for, whichever side they are on")
+
+
+def scribe_of(key):
+    """The scribe for a faction key: the native one, or under isekai the arrival who keeps the book."""
+    s = SCRIBES[key]
+    return dict(s, **ISEKAI_SCRIBES[key]) if premise.is_isekai() else s
+
+
+def personal_scribe():
+    return dict(PERSONAL, **ISEKAI_PERSONAL) if premise.is_isekai() else PERSONAL
 CAPITALS = {"A": [(1519, "Stormwind"), (1537, "Ironforge"), (1657, "Darnassus")],
             "H": [(1637, "Orgrimmar"), (1638, "Thunder Bluff"), (1497, "the Undercity")]}
 CITIES = {zone: (name, side) for side, cities in CAPITALS.items() for zone, name in cities}
@@ -555,10 +580,10 @@ def rumour_judge_prompt(e, text, known):
     return premise.judge_prompt(e, text, 0, known) if premise.is_isekai() else eras.judge_prompt(e, text, known)
 
 
-def check_words(text, e):
+def check_words(text, e, figures=False):
     if e["meta"].search(text):
         raise ValueError(f"out-of-world word: {e['meta'].search(text).group(0)!r}")
-    if DIGITS.search(text):
+    if DIGITS.search(text) and not figures:
         raise ValueError("figures in the text")
 
 
@@ -567,7 +592,32 @@ def json_reply(out):
     return json.loads(m.group(0)) if m else {}
 
 
+def entry_prompt_isekai(scribe, e, start, reports):
+    """The day-book as an arrival keeps it: a modern person's journal of the days since everyone woke."""
+    enemy = SCRIBES[OTHER[scribe["key"]]]["faction"]
+    lines = "\n".join(f"- {r['text']}" for r in reports if not r["enemy"]) or "- (nothing from our own side)"
+    heard = "\n".join(f"- {r['text']}" for r in reports if r["enemy"])
+    day = premise.days_here(start.date())
+    return (f"You are {scribe['name']}, {scribe['about']}. {premise.setting(e)}\n\n"
+            f"It is day {day + 1} since everyone woke up here. Write the entry in your journal for "
+            f"{WATCH_SPAN[start.hour]}. These reports reached you:\n{lines}\n\n"
+            + (f"Word of the {enemy} side, passed on by people who passed through (none of ours saw it):\n{heard}\n\n"
+               if heard else "")
+            + f"Write it as {scribe['name']} would, in plain modern first-person prose of about 150 to 250 words, "
+            "one to three paragraphs, in your own everyday North American voice. Name the people, bands and places "
+            "given. Say plainly who got stronger, who went down and who came back, and what people are saying about "
+            "the way out, and let your fear, tiredness, dry humour or stubborn hope show. "
+            + (f"Tell the word of the {enemy} side as hearsay, with the suspicion or curiosity you feel; "
+               "those people stay nameless. " if heard else "")
+            + "Use only these reports: invent no other deeds, deaths, people or places. Those struck down went down "
+            "and, as far as the reports say, got back up; nobody named is known to be gone for good, and nobody knows "
+            "yet what dying costs. Do not name the game this world resembles or claim to know what is coming. "
+            "No title, headings, lists or markdown.")
+
+
 def entry_prompt(scribe, e, start, reports):
+    if premise.is_isekai():
+        return entry_prompt_isekai(scribe, e, start, reports)
     enemy = SCRIBES[OTHER[scribe["key"]]]["faction"]
     lines = "\n".join(f"- {r['text']}" for r in reports if not r["enemy"]) or "- (nothing from our own people)"
     heard = "\n".join(f"- {r['text']}" for r in reports if r["enemy"])
@@ -595,6 +645,8 @@ def write_entry(scribe, e, start, reports, known, lanes, judge):
 
 
 def write_prose(prompt, title, e, known, lanes, judge, min_words):
+    if premise.is_isekai():
+        e = rumour_era(e)   # the isekai word filter and judge, as for the rumours
     messages = [{"role": "user", "content": prompt}]
     errors = []
     for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -607,10 +659,10 @@ def write_prose(prompt, title, e, known, lanes, judge, min_words):
                     "stage": "write_prose",
                     "route": "batch",
                 }), title)
-            check_words(body, e)
+            check_words(body, e, figures=premise.is_isekai())
             if len(body.split()) < min_words:
                 raise ValueError("too short")
-            flag = judge.check(eras.judge_prompt(e, body, known))
+            flag = judge.check(rumour_judge_prompt(e, body, known))
             if flag and attempt < MAX_ATTEMPTS:
                 raise ValueError(f"judge: {flag}")
             return title, body, lane.model, flag
@@ -618,6 +670,39 @@ def write_prose(prompt, title, e, known, lanes, judge, min_words):
             errors.append(f"{lane.name}: {ex}")
             log(f"entry attempt {attempt} on {lane.name} failed: {ex}")
     raise RuntimeError("; ".join(errors))
+
+
+def ATTRIB_FAR():
+    if premise.is_isekai():
+        return ('"a guy at the gate swore", "I heard from a woman who came in from the road", "someone '
+                'in the inn was saying", "word is", "apparently", or no attribution at all')
+    return ('"a runner swore", "the ferryman had it from", "a pedlar tells it", '
+            '"word reached us that", "they say", or no attribution at all')
+
+
+def ATTRIB_RETELL():
+    if premise.is_isekai():
+        return ('"a guy from the next town swore", "I had it from a woman who just came up the road", '
+                '"somebody at the inn tells it", "word came down the road", "apparently", '
+                'or no attribution at all')
+    return ('"a carter swore", "I had it from a fisherman", "the miller\'s boy tells it", '
+            '"word came down the river", "a pedlar out of the hills has it", "they say", '
+            'or no attribution at all')
+
+
+def RETELL_TAIL():
+    if premise.is_isekai():
+        return ("Word of the other side keeps its suspicion or curiosity. Under 25 words, plain modern speech, no "
+                "figures or digits, and do not name the game this world resembles.\n")
+    return "Word of the enemy keeps its fear or scorn. Under 25 words, no figures or digits and no game words.\n"
+
+
+def RUMOUR_RULES():
+    if premise.is_isekai():
+        return ("Say it the way arrivals pass news in a town: plain modern speech, no figures or digits, and do not "
+                "name the game this world resembles. Those struck down went down and, as far as anyone knows, got "
+                "back up; nobody is known to be gone for good.\n")
+    return "No figures or digits and no game words. Those struck down were wounded, not slain.\n"
 
 
 def rumour_prompt(scribe, e, start, reports):
@@ -631,15 +716,14 @@ def rumour_prompt(scribe, e, start, reports):
             "- near: how someone in the land where it happened passes it on. Only what the report says, with the same "
             "names, people and places: add no description of the foe, no aftermath and nothing else. Under 20 words.\n"
             "- far: the same news after many mouths, told in some other land as hearsay. Vary how it is attributed "
-            "and do not open them all alike (\"a runner swore\", \"the ferryman had it from\", \"a pedlar tells it\", "
-            "\"word reached us that\", \"they say\", or no attribution at all). Change exactly one detail (a name "
+            "and do not open them all alike (" + ATTRIB_FAR() + "). Change exactly one detail (a name "
             "half-remembered, the foe grown larger, more heroes than there "
             "were) and invent nothing else. Under 25 words.\n"
             f"Also pick up to {HEARSAY_RUMOURS} marked as word of the {enemy}, if any would be talked about. For each, "
             f"write only far (leave near empty): how {scribe['faction']} folk in that land pass on what the {enemy} did, "
             "as hearsay coloured by fear, scorn or grudging respect. The doers stay nameless as in the report; change at "
             "most one detail and invent nothing else. Under 25 words.\n"
-            "No figures or digits and no game words. Those struck down were wounded, not slain.\n"
+            + RUMOUR_RULES() +
             'Reply with JSON only: {"rumours": [{"report": <its number>, "near": "...", "far": "..."}]}')
 
 
@@ -745,12 +829,10 @@ def retell_prompt(scribe, e, jobs):
     return (f"You help news travel in Azeroth. The world: {rumour_world(e)}\n\n"
             f"Word going around among the {scribe['faction']}, and where travellers carry it next:\n{lines}\n\n"
             "For each, write how it sounds one stop further along the road, after a few more mouths, as hearsay. "
-            "Vary how it is attributed and do not begin them all the same way (\"a carter swore\", \"I had it from a "
-            "fisherman\", \"the miller's boy tells it\", \"word came down the river\", \"a pedlar out of the hills has "
-            "it\", \"they say\", or no attribution at all). Keep the heart of it and change exactly "
+            "Vary how it is attributed and do not begin them all the same way (" + ATTRIB_RETELL() + "). Keep the heart of it and change exactly "
             "one more detail: a name half-remembered or lost, the foe grown larger or stranger, more or fewer people, the "
             "place blurred (\"somewhere up north\"). Name no person, company or place that is not already in it. "
-            "Word of the enemy keeps its fear or scorn. Under 25 words, no figures or digits and no game words.\n"
+            + RETELL_TAIL() +
             'Reply with JSON only: {"tales": [{"n": <its number>, "words": "..."}]}')
 
 
@@ -842,7 +924,7 @@ def spread(args, judge):
     e, told = eras.get(args.era), stamp(now)
     stmts, carried = [], 0
     for faction, todo in jobs.items():
-        scribe = SCRIBES[faction]
+        scribe = scribe_of(faction)
         for i in range(0, len(todo), RETELL_BATCH):
             batch = todo[i:i + RETELL_BATCH]
             try:
@@ -952,7 +1034,7 @@ def migrate():
 def chronicle(start, faction, args, judge, until=None):
     end = start + dt.timedelta(hours=WATCH_HOURS)
     cut = min(end, until) if until else end
-    scribe, e = SCRIBES[faction], eras.get(args.era)
+    scribe, e = scribe_of(faction), eras.get(args.era)
     reports, known = watch_reports(start, cut, faction)
     title = title_of(start)
     if len(reports) < MIN_REPORTS:
@@ -1227,8 +1309,29 @@ def personal_words(n):
     return next((lo, hi) for most, lo, hi in PERSONAL_WORDS if n <= most)
 
 
+def personal_prompt_isekai(house, e, start, reports):
+    """The personal edition under isekai: one arrival's notebook about people she is looking out for."""
+    s = personal_scribe()
+    lo, hi = personal_words(len(reports))
+    lines = "\n".join(f"- {r['text']}" for r in reports)
+    day = premise.days_here(start.date())
+    return (f"You are {s['name']}, {s['about']}. {premise.setting(e)}\n\n"
+            f"It is day {day + 1} since everyone woke up here. Among the people you look out for are "
+            f"{household_line(house)}. You keep a notebook of them alone. "
+            f"Write its entry for {WATCH_SPAN[start.hour]}. This is all you heard of them:\n{lines}\n\n"
+            f"Write it as {s['name']} would, in plain modern first-person prose of about {lo} to {hi} words, "
+            f"{'one paragraph' if hi <= 120 else 'one to three paragraphs'}, in your own everyday North American "
+            "voice. Keep to them: others appear only as the reports bring them in. Name the people, bands, foes and "
+            "places given, and let your worry and fondness for them show. Say plainly who got stronger and who went "
+            "down. Use only these reports: invent no other deeds, deaths, people or places. Those struck down went "
+            "down and, as far as the reports say, got back up; nobody named is known to be gone for good. Do not "
+            "name the game this world resembles or claim to know what is coming. No title, headings, lists or markdown.")
+
+
 def personal_prompt(house, e, start, reports):
-    s = PERSONAL
+    if premise.is_isekai():
+        return personal_prompt_isekai(house, e, start, reports)
+    s = personal_scribe()
     lo, hi = personal_words(len(reports))
     lines = "\n".join(f"- {r['text']}" for r in reports)
     return (f"You are {s['name']}, {s['about']}. The world you live in: {e['setting']}\n\n"
@@ -1247,7 +1350,7 @@ def store_personal(start, end, house, title, body, reports, model, era, flag):
         "START TRANSACTION;",
         f"DELETE FROM chronicle_personal WHERE window_start = {q(stamp(start))} AND main_guid = {house['main']};",
         "INSERT INTO chronicle_personal (window_start, window_end, main_guid, scribe, title, body, facts, model, era, flag) "
-        f"VALUES ({q(stamp(start))}, {q(stamp(end))}, {house['main']}, {q(PERSONAL['name'])}, {q(title)}, {q(body)}, "
+        f"VALUES ({q(stamp(start))}, {q(stamp(end))}, {house['main']}, {q(personal_scribe()['name'])}, {q(title)}, {q(body)}, "
         f"{q(json.dumps([r['text'] for r in reports]))}, {q(model)}, {q(era)}, {q(flag[:255]) if flag else 'NULL'});",
         "COMMIT;"]), fetch=False)
 
@@ -1269,7 +1372,7 @@ def chronicle_personal(start, house, args, judge, until=None):
     title, body, model, flag = write_prose(personal_prompt(house, e, start, reports), title, e, gathered.names,
                                            lanes_from(args.entry_lanes), judge, int(lo * 0.6))
     if args.dry_run:
-        print(f"\n== {title} — {house['name']}'s own, by {PERSONAL['name']} ({model}{', FLAG ' + flag if flag else ''})"
+        print(f"\n== {title} — {house['name']}'s own, by {personal_scribe()['name']} ({model}{', FLAG ' + flag if flag else ''})"
               f"\n\n{body}\n")
         return
     store_personal(start, cut, house, title, body, reports, model, args.era, flag)
@@ -1301,8 +1404,8 @@ def snapshot():
                    "COALESCE(flag, ''), HEX(body), HEX(facts) FROM chronicle_personal WHERE body <> '' "
                    f"ORDER BY window_start DESC, main_guid LIMIT {60 * max(1, len(houses))}")
     out = dict(generated=int(time.time()),
-               scribes={k: dict(name=s["name"], faction=s["faction"], about=s["about"]) for k, s in SCRIBES.items()},
-               personal_scribe=dict(name=PERSONAL["name"], about=PERSONAL["about"]),
+               scribes={k: dict(name=scribe_of(k)["name"], faction=s["faction"], about=scribe_of(k)["about"]) for k, s in SCRIBES.items()},
+               personal_scribe=dict(name=personal_scribe()["name"], about=personal_scribe()["about"]),
                households={str(m): dict(main=m, name=h["name"], faction=h["faction"],
                                         members=[dict(guid=x["guid"], name=x["name"], kind=x["kind"]) for x in h["members"]])
                            for m, h in houses.items()},

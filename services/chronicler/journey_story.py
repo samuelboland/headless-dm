@@ -25,6 +25,9 @@ cut the page already draws (`journey-full.js:20 CHAPTER_GAP`). One model call pe
 one story, because nothing in this project stitches calls and a nineteen-hour night will not fit in a
 prompt: the whole of `recall.py` caps a single digest at forty deeds for exactly that reason.
 
+Under PREMISE=isekai the story is of trapped arrivals, may quote their modern talk, and is checked with the
+isekai word filter and judge (get_era, judge_prompt). Native is unchanged.
+
 Nothing here scores or decides anything, and nothing here touches a game object. It reads the same
 rows the dashboard already shows and writes prose into `journey_story`.
 
@@ -48,7 +51,7 @@ sys.path.insert(0, _SERVICES)
 import era as eras  # noqa: E402
 import fleet  # noqa: E402
 import regard as rg  # noqa: E402
-from common import site  # noqa: E402
+from common import premise, site  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STORIES_DIR = os.path.join(site.get("DATA_DIR", "/opt/wow/server/data"), "dashboard-data",
@@ -269,6 +272,20 @@ def attempt_on(lanes, attempt):
     return usable[(attempt - 1) % len(usable)]
 
 
+def get_era(name):
+    """era.get for native. Under isekai gen_backstories.get_era, the isekai word filter, so modern words and
+    talk of levels pass, plus the game's name, which a story told of these people does not say."""
+    if not premise.is_isekai():
+        return eras.get(name)
+    import gen_backstories as gb
+    e = gb.get_era(name)
+    return dict(e, meta=re.compile(r"\b(warcraft)\b|" + e["meta"].pattern, re.I))
+
+
+def judge_prompt(e, body, known):
+    return premise.judge_prompt(e, body, 0, known) if premise.is_isekai() else eras.judge_prompt(e, body, known)
+
+
 def check_words(text, e):
     bad = e["meta"].search(text)
     if bad:
@@ -296,6 +313,29 @@ def chapter_prompt(e, subject, chapter, who, first, last, ended):
         "kicked": f"{subject} was put out of the company at the end of it.",
         "quiet": "It simply ended; they did no more that day.",
     }[ended] if last else ""
+
+    if premise.is_isekai():
+        # The same telling, of people trapped here days ago: their own modern talk may be quoted, and a death
+        # is the ghost's walk back, which nobody is sure always works.
+        return (
+            f"You write up what happened to people, for the people it happened to. {premise.setting(e)}\n\n"
+            f"{when}Write this part of {subject}'s journey. It happened in {chapter['place']}"
+            + (f", and they had {company} beside them" if company else ", and they were alone")
+            + ".\n\n"
+            f"What they did, in order:\n{deeds}\n\n"
+            + (f"What was said while they did it:\n{talk}\n\n" if talk else "")
+            + (f"{closing}\n\n" if closing else "")
+            + f"Write it in plain prose of about {CHAPTER_WORDS[0]} to {CHAPTER_WORDS[1]} words, one or "
+            f"two paragraphs, telling it as something that happened to real people trapped in a real place: "
+            "ordinary people from home, days into a world they cannot leave. You may quote what they said, in "
+            f"their own words. Name {subject} and the people named above. Use only what is written here: "
+            "invent no other deeds, no other people and no other places.\n"
+            "Tell it, do not list it: never work through the creatures one after another. Say what the "
+            "place was like, what it cost them, and what passed between them. Two or three things "
+            "deserve naming; the rest is the weather of the day.\n"
+            f"The people named here all live, {subject} included: one who fell came back as a ghost and "
+            "walked back to their body, and nobody knows if that always works. Never name the game. No "
+            "digits (write \"level five\"), no heading, no title, no lists and no markdown.")
 
     return (
         f"You are a scribe who writes up what travellers did, for the people who did it. "
@@ -336,7 +376,7 @@ def write_chapter(prompt, e, known, lanes, judge, step=None):
             check_words(body, e)
             if len(body.split()) < int(CHAPTER_WORDS[0] * 0.6):
                 raise ValueError("too short")
-            flag = judge.check(eras.judge_prompt(e, body, known))
+            flag = judge.check(judge_prompt(e, body, known))
             if flag and attempt < MAX_ATTEMPTS:
                 raise ValueError(f"judge: {flag}")
             return body, lane.model, flag
@@ -363,7 +403,7 @@ def title_of(subject, chapters, ended):
 def write_story(guid, leg_start, era="classic", step=None, lanes=None, judge=None):
     """The whole story of one journey. Returns the row that was stored."""
     step = step or (lambda said: None)
-    e = eras.get(era)
+    e = get_era(era)
     guid = int(guid)
 
     all_legs = legs(guid)

@@ -37,6 +37,7 @@ import wave
 
 import fleet
 import gen_backstories as g
+from common import premise
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 DATA_DIR = g.site.get("DATA_DIR", "/opt/wow/server/data")
@@ -67,6 +68,13 @@ SAMPLE_LINES = (
     "Stay close. The road bends ahead, and I have no wish to lose anyone else before nightfall.",
     "I have walked a long way to stand here, and I will walk further still before this is done.",
     "Keep your blade close and your wits closer. Nothing out here forgives a careless step.",
+)
+
+# The line a sample says when nothing the character has said fits, under PREMISE=isekai: a modern person's.
+ISEKAI_SAMPLE_LINES = (
+    "Okay, stay close to me. I have no idea what is out there, and I would rather not find out alone.",
+    "I keep waiting to wake up in my own bed, but the road is still here, so I guess we keep walking.",
+    "Honestly, I just want to get everyone to the next town in one piece. After that we will figure it out.",
 )
 
 _locks = {}
@@ -167,7 +175,18 @@ def who(guid):
     return dict(guid=int(guid), name=r[0], race=g.RACES.get(int(r[1]), "unknown"),
                 cls=g.CLASSES.get(int(r[2]), "adventurer"), gender=gender,
                 sex=GENDERS.get(gender, "person"), level=int(r[4]),
-                temperament=(r[5] or "").lower().replace("_", " "), personality=r[6] or "", gist=r[7] or "")
+                temperament=(r[5] or "").lower().replace("_", " "), personality=r[6] or "", gist=r[7] or "",
+                **({"origin": _origin(guid)} if premise.is_isekai() else {}))
+
+
+def _origin(guid):
+    """lore_character.origin (premise.origin as drawn) as a dict, or {} when the row has none."""
+    try:
+        rows = g.sql(f"SELECT origin FROM lore_character WHERE guid = {int(guid)}")
+        o = json.loads(rows[0][0]) if rows and rows[0][0] and rows[0][0] != "NULL" else {}
+    except Exception:
+        return {}
+    return o if isinstance(o, dict) else {}
 
 
 def voice_of(guid):
@@ -215,6 +234,8 @@ WOMAN_WORDS = ("The voice designer hears some words as a man whatever else the l
 def suggest(guid):
     """A voice description written from who they are. A suggestion only: the player edits it."""
     w = who(guid)
+    if premise.is_isekai():
+        return _suggest(w)
     prompt = f"""You are casting a voice actor for {w['name']}, a {w['race']} {w['cls']} and a {w['sex']}, who lives in Azeroth.
 {f"Their manner: {w['temperament']}." if w['temperament'] else ""}
 {f"Who they are: {w['personality']}" if w['personality'] else ""}
@@ -225,6 +246,10 @@ pitch, texture (gravelly, breathy, clear, rasping, smooth), accent or lilt fitti
 Only the sound: nothing about hands, eyes, gestures, clothes or what they do.
 {WOMAN_WORDS if w['gender'] == 1 else ""}One line, 12 to 30 words, no name, no quotation marks, no brackets, no story. Start with exactly "A {w['sex']}'s voice,".
 Example (for someone else): A man's voice, weathered, deep and gravelly, with a slow rolling brogue and a dry, amused edge."""
+    return _cast(prompt)
+
+
+def _cast(prompt):
     lane = fleet.prefer_lanes(DEFAULT_LANE)[0]
     last = None
     for _ in range(3):
@@ -244,6 +269,25 @@ Example (for someone else): A man's voice, weathered, deep and gravelly, with a 
             return text
         last = f"it came back as {len(text.split())} words"
     raise VoiceError(f"No description came back ({last}). Write one yourself.", 502)
+
+
+def _suggest(w):
+    """suggest() under the isekai premise: the voice is the real person's, in a body that is not theirs."""
+    o = w.get("origin") or {}
+    age = o.get("age")
+    home = o.get("home")
+    place = (f"from {o['place_kind']} in {home}, {o.get('country') or 'North America'}" if home and o.get("place_kind")
+             else f"from {home}" if home else "from the United States or Canada")
+    prompt = f"""You are casting a voice actor for {w['name']}, an ordinary person {place}{f", about {age} years old" if age else ""}, who woke up a few days ago in the body of a {w['race']} {w['cls']}. The voice that comes out is still their own, the voice of a {w['sex']} raised there.
+{f"Their manner: {w['temperament']}." if w['temperament'] else ""}
+{f"Who they are: {w['personality']}" if w['personality'] else ""}
+{f"Their past, in brief: {w['gist']}" if w['gist'] else ""}
+
+Describe ONLY how their speaking voice sounds, for a voice designer: whether it is a {w['sex']}'s voice, their real age{" (about " + str(age) + ")" if age else ""}, pitch, texture (gravelly, breathy, clear, rasping, smooth), the home accent of {"someone " + place if home else "a North American speaker"} (not a fantasy accent, nothing fitting a {w['race']}), pace and manner.
+Only the sound: nothing about hands, eyes, gestures, clothes or what they do.
+{WOMAN_WORDS if w['gender'] == 1 else ""}One line, 12 to 30 words, no name, no quotation marks, no brackets, no story. Start with exactly "A {w['sex']}'s voice,".
+Example (for someone else): A man's voice, mid-forties, a little hoarse, with a flat Midwestern accent and a dry, tired edge."""
+    return _cast(prompt)
 
 
 def _trim(text, most):
@@ -273,7 +317,8 @@ def sample_text(guid):
         said = speakable(r[0])
         if 60 <= len(said) <= 220 and not re.search(r"\d", said):
             return said
-    return SAMPLE_LINES[int(guid) % len(SAMPLE_LINES)]
+    lines = ISEKAI_SAMPLE_LINES if premise.is_isekai() else SAMPLE_LINES
+    return lines[int(guid) % len(lines)]
 
 
 # ---------------------------------------------------------------------------

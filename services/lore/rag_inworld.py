@@ -11,6 +11,10 @@
            and tags are kept so retrieval still matches. RAG loads only at
            worldserver startup.
 
+Under PREMISE=isekai both write what an arrival a few days in has picked up
+instead (ISEKAI_PROMPT, ISEKAI_REVISE_PROMPT), checked with the isekai word
+filter and judge; native is unchanged.
+
 Usage:
   python3 rag_inworld.py inworld [--route chronicle] [--workers 2]
   python3 rag_inworld.py revise --era classic --backup-dir DIR [--lanes a,b] [--slots lane=n]
@@ -32,7 +36,7 @@ import fleet
 
 # realpath, not abspath: reached through /opt/wow/lore, a symlink into the repo (plan 23 W1).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-from common import site  # noqa: E402
+from common import premise, site  # noqa: E402
 
 _R = fleet._fleet.router()
 # All three used to name this machine. The knowledge base ships inside the module, lands in the data
@@ -66,6 +70,46 @@ TITLE: {title}
 NOTE: {content}"""
 
 
+# Under PREMISE=isekai the notes are what an arrival a few days in has picked up (the isekai chat prompt frames
+# them as "things you have picked up since you woke here"): seen, told by locals, or heard from other arrivals.
+# Practical and plain, levels as numbers allowed, and never the game's name: that is per-person (the bio).
+ISEKAI_PROMPT = """You are rewriting a reference note for ordinary people from the United States and Canada who woke up a few days ago in a strange world that works like a game: they feel their level, health and skills. They do not know its history.
+
+Rewrite the note below as what one of them could have seen, been told by the locals, or heard from other newcomers by now: practical, survival-minded knowledge (where to go, what is dangerous, who sells what, which town is which), in plain modern English, 40 to 110 words. Keep every true place, person, faction and creature. Levels as numbers are fine ("the gnolls past the river are level 10, stay away at 3"). Old history only as something a local said, never as lifelong familiarity. Never name the game, its expansions, patches, servers, addons or interface.
+
+If nothing of the note would matter to someone living there (for example it is about addons, the user interface or game settings), reply with exactly: DROP
+
+Reply with only the rewritten note, or DROP. No title, no preamble.
+
+TITLE: {title}
+NOTE: {content}"""
+
+ISEKAI_REVISE_PROMPT = """{setting}
+
+Below is a note of what newcomers pick up in their first days. {instruction}
+
+It must be what a newcomer a few days in could have seen, been told by locals, or heard from other newcomers: practical, plain modern English, levels as numbers allowed. Keep every place, person, faction, creature and fact that is true in this time. Rewrite or leave out anything that has not happened yet, anything told as lifelong familiarity with the world's past, and any name of the game, its expansions, servers or interface. 40 to 110 words.
+
+Reply with only the note{keep_clause}. No title, no preamble.
+
+TITLE: {title}
+NOTE: {content}"""
+
+
+def get_era(name):
+    """era.get for native. Under isekai, gen_backstories.get_era (the isekai word filter), plus the game's name,
+    which no note every bot reads may say."""
+    if not premise.is_isekai():
+        return eras.get(name)
+    import gen_backstories as gb
+    e = gb.get_era(name)
+    return dict(e, meta=re.compile(r"\b(warcraft)\b|" + e["meta"].pattern, re.I))
+
+
+def judge_prompt(e, text):
+    return premise.judge_prompt(e, text, 0) if premise.is_isekai() else eras.judge_prompt(e, text)
+
+
 def ask(route, prompt, timeout=180):
     body = json.dumps({"model": route, "prompt": prompt, "stream": False,
                        "options": {"temperature": 0.4, "num_predict": 400}}).encode()
@@ -79,7 +123,8 @@ def ask(route, prompt, timeout=180):
 def rewrite(route, entry):
     for attempt in range(3):
         try:
-            out = ask(route, PROMPT.format(title=entry.get("title", ""), content=entry["content"]))
+            out = ask(route, (ISEKAI_PROMPT if premise.is_isekai() else PROMPT).format(
+                title=entry.get("title", ""), content=entry["content"]))
         except Exception as e:  # backends can vanish (reclaim mode); retry
             err = e
             continue
@@ -131,8 +176,9 @@ def inworld(args):
 
 def revise_entry(lane, attempt, e, judge, entry, results, key, review_lock):
     forced = attempt > 1
-    prompt = REVISE_PROMPT.format(
-        setting=e["setting"], title=entry.get("title", ""), content=entry["content"],
+    isekai = premise.is_isekai()
+    prompt = (ISEKAI_REVISE_PROMPT if isekai else REVISE_PROMPT).format(
+        setting=premise.setting(e) if isekai else e["setting"], title=entry.get("title", ""), content=entry["content"],
         instruction=("It contains things that are not true in this time, so it must be rewritten." if forced else
                      "If everything in it is already true in this time, reply exactly KEEP."),
         keep_clause="" if forced else ", or KEEP")
@@ -150,7 +196,7 @@ def revise_entry(lane, attempt, e, judge, entry, results, key, review_lock):
     bad = e["meta"].search(text)
     if bad:
         raise ValueError(f"out-of-world term: {bad.group(0)!r}")
-    evidence = judge.check(eras.judge_prompt(e, text))
+    evidence = judge.check(judge_prompt(e, text))
     if evidence:
         if attempt < fleet.MAX_ATTEMPTS:
             raise ValueError(f"judge: {evidence}")
@@ -161,7 +207,7 @@ def revise_entry(lane, attempt, e, judge, entry, results, key, review_lock):
 
 
 def revise(args):
-    e = eras.get(args.era)
+    e = get_era(args.era)
     backup = os.path.join(args.backup_dir, "ollama-rag")
     if not os.path.exists(backup):
         shutil.copytree(DST, backup)

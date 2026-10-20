@@ -23,6 +23,9 @@ sets.
 Why only the quests this realm has touched: the world holds ~9,465 of them, but a played realm meets far
 fewer (1,169 here), and the ones it has met are era-appropriate by construction -- the same reasoning that
 made `gen_places.py` seed from the ledger rather than from the world database.
+
+Under PREMISE=isekai the bots are arrivals who see the quest text, so the phrase is theirs in plain modern English
+(a quest, a job, a task; ISEKAI_PROMPT), checked with the isekai word filter and judge. Native is unchanged.
 """
 
 import argparse
@@ -44,6 +47,7 @@ import areas                    # noqa: E402  zone id -> name, read from the cli
 import era as eras              # noqa: E402
 import fleet                    # noqa: E402
 import gen_backstories as g     # noqa: E402
+from common import premise      # noqa: E402
 from common import site         # noqa: E402
 
 SCHEMA = os.path.join(HERE, "quest_tables.sql")
@@ -124,6 +128,40 @@ Rules:
 
 Write only the phrase."""
 
+
+# Under PREMISE=isekai every bot is an arrival who sees the quest text the way a player does, and calls it what a
+# modern person would: a quest, a job, a task. The locals still speak in-world; this table is the bots' own words.
+ISEKAI_PROMPT = """You write lines for a story. {setting}{limits}
+
+One of these newcomers has taken on a quest from a local. The quest text they see calls it "{title}", but nobody talks like that. What they were actually asked to do: {objective}
+
+Write how they would refer to this quest in conversation, in plain modern English - the thing itself, not its filed name. Newcomers call these quests, jobs or tasks.
+
+It has to fit inside a sentence somebody says. Test it by reading these aloud with your phrase in place of the blank:
+  "I am still at ____."      "____ is done."      "He asked me about ____."
+
+Rules:
+- At most 18 words. A NAMING PHRASE, never a sentence and never a command.
+- Begin with a noun, with "the", or with an -ing word. NEVER begin with a command verb: not "Kill", not "Speak", not "Bring", not "Return".
+- Do NOT hand the quest back as an order. "Kill eight kobold vermin and return to Marshal McBride" is WRONG. "the kobold job for Marshal McBride" is right.
+- Good: "helping Farmer Saldean with the harvest watchers" - "Willem's bounty on Padfoot" - "the quest about the book at Sven's farm".
+- NEVER reuse the filed name or any run of three words from it. If the filed name is "Wolves Across the Border", "the wolves crossing the border" is right and "Wolves Across the Border" is wrong.
+- Name only what you were told above. Do not invent a place, a building or a title that was not given to you.
+- Never name the game.
+- No counts at all, in digits or in words: not "8", not "eight", not "a dozen".
+- NEVER advice, NEVER a warning, NEVER an instruction. Do not address anyone: no "you", no "your".
+- No quotation marks, no markdown.
+
+Write only the phrase."""
+
+
+def get_era(name):
+    """era.get for native. Under isekai gen_backstories.get_era (the isekai word filter), plus the game's name,
+    which no phrase a bot says may carry."""
+    if not premise.is_isekai():
+        return eras.get(name)
+    e = g.get_era(name)
+    return dict(e, meta=re.compile(r"\b(warcraft)\b|" + e["meta"].pattern, re.I))
 
 # ---------------------------------------------------------------------------
 # what this realm has actually taken on
@@ -259,7 +297,11 @@ def quest_rows(e, args):
 # generation
 
 def build(lane, e, title, objective):
-    prompt = PROMPT.format(setting=e["setting"], limits=e["limits"], title=title, objective=objective)
+    if premise.is_isekai():
+        prompt = ISEKAI_PROMPT.format(setting=premise.setting(e), limits=e["limits"], title=title,
+                                      objective=objective)
+    else:
+        prompt = PROMPT.format(setting=e["setting"], limits=e["limits"], title=title, objective=objective)
     text = lane.chat([{"role": "user", "content": prompt}], 120, temperature=0.85,
         context={
             "purpose": "quest_words",
@@ -357,7 +399,9 @@ def problems(text, e, title, objective, judge=None):
     if not out and judge is not None:
         # The objective only, never the title: handing the judge the filed name would tell it that the exact
         # wording this table exists to avoid is acceptable.
-        evidence = judge.check(eras.judge_prompt(e, text, known=known_names(objective)))
+        known = known_names(objective)
+        evidence = judge.check(premise.judge_prompt(e, text, 0, known=known) if premise.is_isekai()
+                               else eras.judge_prompt(e, text, known=known))
         if evidence:
             out.append(f"judge: {evidence}")
     return out
@@ -388,7 +432,7 @@ def lanes_for(args):
 # commands
 
 def generate(args):
-    e = eras.get(args.era)
+    e = get_era(args.era)
     ensure_schema()
     lanes = lanes_for(args)
     judge = None if args.no_judge else fleet.Judge()
@@ -431,7 +475,7 @@ def generate(args):
 
 def sample(args):
     """Print phrases for a few errands on each lane; stores nothing."""
-    e = eras.get(args.era)
+    e = get_era(args.era)
     lanes = lanes_for(args)
     judge = None if args.no_judge else fleet.Judge()
     rows = quest_rows(e, args) or []
@@ -459,7 +503,7 @@ def sample(args):
 
 def collide(args):
     """Any 4-gram shared across two different errands' phrases. A phrase that fits every quest names none."""
-    e = eras.get(args.era)
+    e = get_era(args.era)
     rows = g.sql("SELECT quest_id, variant, words FROM quest_words "
                  f"WHERE era = {g.q(e['name'])} ORDER BY quest_id, variant")
     grams = collections.defaultdict(set)
@@ -483,7 +527,7 @@ def collide(args):
 
 
 def report(args):
-    e = eras.get(args.era)
+    e = get_era(args.era)
     held = g.sql("SELECT COUNT(*), AVG(CHAR_LENGTH(words)) FROM quest_words "
                  f"WHERE era = {g.q(e['name'])}")[0]
     usable = len(quest_rows(e, args))

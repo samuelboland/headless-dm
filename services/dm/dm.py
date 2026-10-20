@@ -52,6 +52,7 @@ import areas  # noqa: E402  (where a point is, from the terrain files)
 
 sys.path.insert(0, _SERVICES)
 from common import site  # noqa: E402
+from common import premise  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PAUSE_FILE = os.path.join(HERE, "PAUSE")
@@ -275,6 +276,29 @@ RULES = ("Rules: each line is one or two sentences and at most thirty words, spo
          'Reply with JSON only: {{"lines": ["...", "...", "..."]}}')
 
 
+# Under PREMISE=isekai the people in front of an NPC are arrivals from another world. The NPC was born here and
+# acts as if nothing has happened: it sees foreigners with odd words and manners, and keeps to its own speech.
+# Its lines are still checked by the native word filter and judge (check), so a modern word it picks up is
+# rejected; only what it is TOLD (tales, wants) comes from isekai sources, and nothing here checks that.
+ISEKAI_BOSS_NOTE = (
+    " The travellers may talk and act strangely, with odd words and manners, as if from some far country; "
+    "you take that for the ways of foreigners, you do not understand their strange words, and you never use "
+    "them. Anything above that sounds modern or outlandish, say in plain words of your own world, or leave it out.")
+ISEKAI_INN_NOTE = (
+    " The travellers may talk strangely, with odd words and manners, and lately more of them have come through "
+    "than you can account for: lost, soft-handed, unsure of the roads. You find that curious, a thing to remark "
+    "on in passing, never to explain; you do not understand their strange words and never use them. Anything "
+    "above that sounds modern or outlandish, say in plain words of your own world, or leave it out.")
+
+
+def rules(template, note):
+    """RULES / INN_RULES with the setting slot filled by the caller; under isekai, with the NPC's note added."""
+    if not premise.is_isekai():
+        return template
+    head, sep, tail = template.partition(" Era: ")
+    return head + note + sep + tail
+
+
 def anyone_prompt(boss, e):
     moods = random.sample(MOODS, 3)
     return (f"You are {boss['name']}, master of {boss['place']}. Intruders have fought their way to you and are "
@@ -282,7 +306,7 @@ def anyone_prompt(boss, e):
             + who_you_are(boss)
             + voice_block(boss)
             + f"Write three different things you might call out to them, one each in these moods: {', '.join(moods)}.\n\n"
-            + RULES.format(setting=e["setting"]))
+            + rules(RULES, ISEKAI_BOSS_NOTE).format(setting=e["setting"]))
 
 
 # ---------------------------------------------------------------------------
@@ -457,7 +481,7 @@ def party_prompt(boss, e, party, met, tales, wants, runs=()):
             + "Write three different things you might call out to them. Speak to THEM: name one or two of them if you "
               "have reason to know them (an old meeting, a rumour); otherwise address them by what you can see, a "
               "dwarf, a priest, a band of thieves. If you remember them, or their failure, the first line must show it.\n\n"
-            + RULES.format(setting=e["setting"]))
+            + rules(RULES, ISEKAI_BOSS_NOTE).format(setting=e["setting"]))
 
 
 def answer_cue(cue_id, dry_run=False, judge=None):
@@ -611,7 +635,7 @@ def inn_prompt(e, zone, person, party, talk, tales, said):
               "ONE piece of talk from above in your own words, as gossip, or, if the land speaks of them, lets them "
               "know their name has reached you. Address them by name only if you have heard of them or have "
               "spoken before; otherwise by what you can see. Warm or wary as suits the news.\n\n"
-            + INN_RULES.format(setting=e["setting"]))
+            + rules(INN_RULES, ISEKAI_INN_NOTE).format(setting=e["setting"]))
 
 
 def inn_lines(guid, zone, dry_run=False, judge=None, cue_id=None, label="inn"):

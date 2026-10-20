@@ -20,6 +20,9 @@ Why the seed is the ledger and not the world database: `creature.zoneId` is 0 fo
 and `areaId` for 146,271 -- both are optional caches, and the ids that are set belong to later expansions.
 Resolving spawns to zones needs the core's map and DBC machinery, not SQL. The ledger already knows what this
 realm has actually met, weighted by how often, which is the better question anyway (plan 46 section 2).
+
+Under PREMISE=isekai the fragments are what the arrivals, days in, have noticed and been told (ISEKAI_PROMPT,
+ISEKAI_ANGLES), checked with the isekai word filter and judge. Native is unchanged.
 """
 
 import argparse
@@ -42,6 +45,7 @@ import areas                    # noqa: E402  the client's AreaTable.dbc, read o
 import era as eras              # noqa: E402
 import fleet                    # noqa: E402
 import gen_backstories as g     # noqa: E402
+from common import premise      # noqa: E402
 from common import site         # noqa: E402
 
 SCHEMA = os.path.join(HERE, "place_tables.sql")
@@ -57,6 +61,16 @@ ANGLES = {
     "grievance": "what someone who lives here complains about",
 }
 ORDER = ["sight", "danger", "people", "grievance"]
+# Under PREMISE=isekai the almanac is what the arrivals, days in, have noticed and been told: the same angles, seen
+# by a modern person rather than by someone who grew up here.
+ISEKAI_ANGLES = {
+    "sight": "one thing newcomers notice here and nowhere else - a creature at its business, a shape in the "
+             "land - and how strange it looks to someone from home, shown plainly",
+    "danger": "what newcomers have learned, or been told, kills people here, stated flatly as a fact about the "
+              "place",
+    "people": "who lives or works here, and how they treat the newcomers, whom they take for locals",
+    "grievance": "what newcomers grumble about here, or a rumour going round among them",
+}
 
 # plans/45. A "danger" angle invites the exact tic that plan owns -- "keep your eyes open", "watch the
 # shadows". Shipping four of those per zone would install it in every zone at once, in the prompt itself,
@@ -100,21 +114,62 @@ Rules:
 Write only the fragment."""
 
 
+ISEKAI_PROMPT = """You write short notes for a story. {setting}{limits}
+
+The place: {zone}.
+The creatures this fragment is about: {creatures}.
+
+Write ONE fragment about this place, from this angle: {angle}
+
+Rules:
+- At most 35 words, one or two sentences.
+- What the newcomers have seen or been told here, in plain modern English, in the third person ("newcomers", "the locals"): no "I", "my", "we" or "our". No greeting, no dialogue, no quotation marks.
+- They have been here only days: nothing told as lifelong familiarity, and never the name of the game.
+- NEVER advice, NEVER a warning, NEVER an instruction to anyone. Do not address a reader at all: no "you", no "your".
+- No numbers, no lists, no markdown.
+- Name at least one of the creatures above, and no other beast or monster, so it could not be mistaken for anywhere else.
+- Kinds of creature in lowercase, as common nouns ("crag boars", not "Crag Boars"); only a tribe's or people's own name takes a capital.
+- Do NOT begin with the name of the place, and do not begin "The ... in {zone}", "The air" or "The ground". Begin with something particular to this place. The listener already knows where they stand; the name may appear later or not at all.
+
+Write only the fragment."""
+
+
 # For a place the ledger cannot seed: a capital, where nothing is killed but the odd duel. The model writes
 # from what it knows of the place, and the operator reads every fragment before `keep` stores it -- the era
 # checks prove a fragment is of its time, never that it is true of the place.
-SEEDLESS = (PROMPT
+def _seedless(prompt):
+    return (prompt
             .replace("The creatures this fragment is about: {creatures}.\n", "")
             .replace("- Name at least one of the creatures above, and no other beast or monster, so it could not "
                      "be mistaken for anywhere else.",
                      "- Name at least one of these, which are the real districts and buildings of {zone}: "
                      "{districts}. Name no district or building that is not on that list.\n"
                      "- No beasts or monsters: a city is its people, its buildings and its trades."))
+
+
+SEEDLESS = _seedless(PROMPT)
+ISEKAI_SEEDLESS = _seedless(ISEKAI_PROMPT)
 # The first capitals draft, read by the operator 2026-09-24: 6 of 16 rejected. Crag boars (Dun Morogh's) in three
 # Thunder Bluff fragments, Orgrimmar's Valley of Wisdom in Undercity, Northrend's Warsong Hold in Orgrimmar,
 # and immortality granted in Darnassus. The last two are era errors; the first two are the kind no check can see.
 # The second draft still invented "Skyhorn Mesa" and "Spiritwalker's Terrace", so the prompt now carries the
 # city's real districts (areas.subzones: AreaTable + WMOAreaTable) and the validator requires one of them.
+
+
+def get_era(name):
+    """era.get for native. Under isekai gen_backstories.get_era (the isekai word filter), plus the game's name,
+    which no fragment every bot reads may say."""
+    if not premise.is_isekai():
+        return eras.get(name)
+    e = g.get_era(name)
+    return dict(e, meta=re.compile(r"\b(warcraft)\b|" + e["meta"].pattern, re.I))
+
+
+def prompt_parts(e):
+    """(prompt, seedless prompt, angles, setting) for this premise."""
+    if premise.is_isekai():
+        return ISEKAI_PROMPT, ISEKAI_SEEDLESS, ISEKAI_ANGLES, premise.setting(e)
+    return PROMPT, SEEDLESS, ANGLES, e["setting"]
 
 
 def districts(e, zone_id):
@@ -267,9 +322,10 @@ def inhabitants(zone_id, limit=30):
 # generation
 
 def build(lane, e, zone, creatures, angle):
-    prompt = PROMPT.format(setting=e["setting"], limits=e["limits"], zone=zone,
-                           creatures=", ".join(deal(kinds(creatures), angle)) or "little worth naming",
-                           angle=ANGLES[angle])
+    template, _seedless_, angles, setting = prompt_parts(e)
+    prompt = template.format(setting=setting, limits=e["limits"], zone=zone,
+                             creatures=", ".join(deal(kinds(creatures), angle)) or "little worth naming",
+                             angle=angles[angle])
     text = lane.chat([{"role": "user", "content": prompt}], 200, temperature=0.85,
         context={
             "purpose": "place_lore",
@@ -323,7 +379,8 @@ def problems(text, e, zone, creatures, angle, judge=None):
     if theirs:
         out.append(f"names another angle's creature: {theirs}")
     if not out and judge is not None:
-        evidence = judge.check(eras.judge_prompt(e, text, known=creatures))
+        evidence = judge.check(premise.judge_prompt(e, text, 0, known=creatures) if premise.is_isekai()
+                               else eras.judge_prompt(e, text, known=creatures))
         if evidence:
             out.append(f"judge: {evidence}")
     return out
@@ -367,7 +424,7 @@ def wanted_zones(e, args):
 # commands
 
 def generate(args):
-    e = eras.get(args.era)
+    e = get_era(args.era)
     ensure_schema()
     lanes = lanes_for(args)
     judge = None if args.no_judge else fleet.Judge()
@@ -409,7 +466,7 @@ def generate(args):
 def draft(args):
     """Seedless fragments for named zones, checked like any other, written to --save for the operator to read.
     STORES NOTHING: `keep` stores exactly what was read, never a regeneration."""
-    e = eras.get(args.era)
+    e = get_era(args.era)
     if not args.zones or not args.save:
         sys.exit("draft needs --zones and --save")
     lanes = lanes_for(args)
@@ -429,8 +486,9 @@ def draft(args):
                 continue
             for attempt in range(1, fleet.MAX_ATTEMPTS + 1):
                 lane = lanes[(len(out) + attempt) % len(lanes)]
-                text = clean(lane.chat([{"role": "user", "content": SEEDLESS.format(
-                    setting=e["setting"], limits=e["limits"], zone=zone, angle=ANGLES[angle],
+                _p, seedless, angles, setting = prompt_parts(e)
+                text = clean(lane.chat([{"role": "user", "content": seedless.format(
+                    setting=setting, limits=e["limits"], zone=zone, angle=angles[angle],
                     districts=", ".join(real) or zone)}],
                     200, temperature=0.85,
                         context={
@@ -463,7 +521,7 @@ def keep(args):
     """Store a draft file exactly as it was read. Rows can be dropped from the file first."""
     with open(args.save, encoding="utf-8") as fh:
         doc = json.load(fh)
-    e = eras.get(args.era)
+    e = get_era(args.era)
     if doc["era"] != e["name"]:
         sys.exit(f"draft is for era {doc['era']}, not {e['name']}")
     ensure_schema()
@@ -482,7 +540,7 @@ def a_label(zid, zone, angle):
 
 def sample(args):
     """Print fragments for a few zones on each lane; stores nothing."""
-    e = eras.get(args.era)
+    e = get_era(args.era)
     lanes = lanes_for(args)
     judge = None if args.no_judge else fleet.Judge()
     rows = wanted_zones(e, args) or []
@@ -509,7 +567,7 @@ def sample(args):
 
 def collide(args):
     """Any 4-gram shared across two different zones' fragments (plan 40 section 6 mandate 2)."""
-    e = eras.get(args.era)
+    e = get_era(args.era)
     rows = g.sql("SELECT zone_id, variant, angle, words FROM place_words "
                  f"WHERE era = {g.q(e['name'])} ORDER BY zone_id, variant")
     names = areas.load()
@@ -539,7 +597,7 @@ def collide(args):
 
 
 def report(args):
-    e = eras.get(args.era)
+    e = get_era(args.era)
     rows = g.sql("SELECT zone_id, COUNT(*) AS n, AVG(CHAR_LENGTH(words)) AS avg_len FROM place_words "
                  f"WHERE era = {g.q(e['name'])} GROUP BY zone_id ORDER BY zone_id")
     names = areas.load()

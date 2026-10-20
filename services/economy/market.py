@@ -38,6 +38,7 @@ HERE = Path(__file__).resolve().parent
 # Where this realm lives now comes from site/, with the live server config as the fallback (plan 23 W1/W16).
 sys.path.insert(0, str(HERE.parent))
 from common import site  # noqa: E402
+from common import premise  # noqa: E402
 
 MARKET_JSON = Path(os.environ.get("MARKET_JSON", os.path.join(
     site.get("DATA_DIR", "/opt/wow/server/data"), "dashboard-data", "market.json")))
@@ -90,6 +91,41 @@ SELLING_WORDS = (
     "{s} has {t} on the {city} stalls, for anyone who wants it.",
     "Word in {city} is that {s} is selling {t}.",
 )
+
+# Under PREMISE=isekai (services/common/premise.py) the talk is arrivals', ordinary North Americans reading
+# a market they do not understand yet: prices set against real money and groceries, shock, haggling, a few
+# people who seem to know what sells. Same placeholders, same rule: facts in words, no figures.
+ISEKAI_GLUT_WORDS = (
+    "{n} is piled up all over the {city} auction house, and it is priced like a rip-off anyway",
+    "The {city} auction house is drowning in {ln}; somebody is going to have to explain that to me",
+    "Honestly, there is so much {ln} in {city} it looks like a warehouse club",
+    "Every stall at the {city} auction house is full of {ln}, and people just walk past it",
+    "There is more {ln} in {city} than anyone could use, and prices look as silly as gas station snacks",
+)
+ISEKAI_GLUT_FROM = (", most of it from {s}.", ", and {s} apparently brought the bulk of it.", "; {s} has most of it.")
+ISEKAI_BOUGHT_WORDS = (
+    "At the {city} auction house, {t} went the moment it was put up, and nobody could haggle.",
+    "{T} did not last an hour at the {city} auction house; somebody clearly knows what sells.",
+    "Someone in {city} snapped up {t} instantly, like they had a shopping list.",
+    "{T} was gone from the {city} auction house before I could even compare the price to anything back home.",
+)
+ISEKAI_UNSOLD_WORDS = (
+    "Nobody in {into} wants {t} right now; it just sits at the auction house, unloved.",
+    "{T} has been sitting at the {city} auction house for days, and the price still makes no sense to me.",
+    "You could not give away {t} in {into} this week, even if you offered it half price.",
+    "The {city} auction house still has {t} that nobody will touch, and I would not either.",
+)
+ISEKAI_SELLING_WORDS = (
+    "{s} has put {t} up at the {city} auction house, and the asking price is a lot for what it is.",
+    "{s} is looking for a buyer for {t} in {city}; try haggling, people say it works.",
+    "{s} has {t} at the {city} auction house, for anyone who can make sense of the prices.",
+    "Word in {city} is that {s} is selling {t}, and that it is cheaper than it looks.",
+)
+
+
+def words_for(native, isekai):
+    """A phrase pool: the native one, or under isekai the arrivals' (see above)."""
+    return isekai if premise.is_isekai() else native
 
 
 def log(msg):
@@ -256,30 +292,30 @@ def market_words(events, items, rng):
             seller = sellers.most_common(1)[0][0] if sellers else None
             name = spoken_name(items[entry])
             facts.append((entry, lambda city, into, n=name, s=seller,
-                          p=rng.randrange(len(GLUT_WORDS)), f=rng.randrange(len(GLUT_FROM)):
-                          GLUT_WORDS[p].format(n=n[:1].upper() + n[1:], ln=n, city=city, into=into)
-                          + (GLUT_FROM[f].format(s=s) if s else ".")))
+                          p=rng.randrange(len(words_for(GLUT_WORDS, ISEKAI_GLUT_WORDS))), f=rng.randrange(len(words_for(GLUT_FROM, ISEKAI_GLUT_FROM))):
+                          words_for(GLUT_WORDS, ISEKAI_GLUT_WORDS)[p].format(n=n[:1].upper() + n[1:], ln=n, city=city, into=into)
+                          + (words_for(GLUT_FROM, ISEKAI_GLUT_FROM)[f].format(s=s) if s else ".")))
 
         bought = {e["entry"] for e in evs if e["event"] == "sale" and e["buyer_kind"] in ("player", "bot")}
         for entry in rng.sample(sorted(bought), min(2, len(bought))):
             thing = with_article(items[entry])
-            facts.append((entry, lambda city, into, t=thing, p=rng.randrange(len(BOUGHT_WORDS)):
-                          BOUGHT_WORDS[p].format(t=t, T=t[:1].upper() + t[1:], city=city, into=into)))
+            facts.append((entry, lambda city, into, t=thing, p=rng.randrange(len(words_for(BOUGHT_WORDS, ISEKAI_BOUGHT_WORDS))):
+                          words_for(BOUGHT_WORDS, ISEKAI_BOUGHT_WORDS)[p].format(t=t, T=t[:1].upper() + t[1:], city=city, into=into)))
 
         expired = collections.Counter(e["entry"] for e in evs if e["event"] == "expire" and e["seller_kind"] == "merchant"
                                       and items[e["entry"]]["quality"] >= 2)
         unsold = [entry for entry, n in expired.most_common(10) if entry not in bought and n >= 2]
         for entry in unsold[:1]:
             thing = spoken_name(items[entry])
-            facts.append((entry, lambda city, into, t=thing, p=rng.randrange(len(UNSOLD_WORDS)):
-                          UNSOLD_WORDS[p].format(t=t, T=t[:1].upper() + t[1:], city=city, into=into)))
+            facts.append((entry, lambda city, into, t=thing, p=rng.randrange(len(words_for(UNSOLD_WORDS, ISEKAI_UNSOLD_WORDS))):
+                          words_for(UNSOLD_WORDS, ISEKAI_UNSOLD_WORDS)[p].format(t=t, T=t[:1].upper() + t[1:], city=city, into=into)))
 
         townsfolk = [e for e in evs if e["event"] == "list" and e["seller_kind"] == "bot" and e["seller"]]
         for e in rng.sample(townsfolk, min(2, len(townsfolk))):
             thing = with_article(items[e["entry"]])
             facts.append((e["entry"], lambda city, into, s=e["seller"], t=thing,
-                          p=rng.randrange(len(SELLING_WORDS)):
-                          SELLING_WORDS[p].format(s=s, t=t, T=t[:1].upper() + t[1:], city=city, into=into)))
+                          p=rng.randrange(len(words_for(SELLING_WORDS, ISEKAI_SELLING_WORDS))):
+                          words_for(SELLING_WORDS, ISEKAI_SELLING_WORDS)[p].format(s=s, t=t, T=t[:1].upper() + t[1:], city=city, into=into)))
 
         rng.shuffle(facts)
         for zone, city, into in cities:

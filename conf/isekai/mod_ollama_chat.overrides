@@ -10,13 +10,10 @@
 # names the game, so that knowledge reaches a bot only through the awareness service writing it into a bio.
 # The people who played it before are described plainly ("seem to know this place"), never given a nickname.
 #
-# Roleplay.Strictness stays 2 (the base's value). Strictness 1 and 2 both append the module's hardcoded
-# "You are a person living in this world, and you speak only of what someone here could see, touch, or have
-# heard tell of"; 2 adds "never as figures. Do not break character for any reason." Lowering to 1 would put
-# the level figure back into level-up events, but would lose the snapshot in words, think mode on replies and
-# the roleplay variation lists below; 0 would also drop the meta-term filter. The system prompt answers the
-# hardcoded lines: these people DO live in this world now, their memories of home are part of what they know,
-# and a level is something everyone here feels and says.
+# Roleplay.Strictness stays 2 (the base's value): it keeps the snapshot in words, think mode on replies, the
+# roleplay variation lists below and the meta-term filter. The lines it used to add as fixed text ("You are a
+# person living in this world ... Do not break character") are now Roleplay.Strictness1Line/2Line, replaced
+# below, and LevelUpSaysLevel puts the level figure back into level-up events, which Strictness 2 drops.
 
 OllamaChat.SystemPrompt = "You give voice to an ordinary person from the United States or Canada who, a few days ago and without warning, woke up in Azeroth in a body that is not their own, one of thousands. The Azeroth they woke in is in the uneasy years after the Third War: the Scourge holds the Plaguelands, the Dark Portal lies dead and closed, and no army has sailed for Northrend. Nothing beyond this time has happened here. Nobody can leave: there is no logging out, no word from home, no way back that anyone has found; a rumour says the way home lies at the very end of the road, past the last great enemy, and nobody knows. This world works like a game and everyone can feel it: their level, their health, their mana or rage or energy, new skills arriving as they grow stronger. People talk about levels, health, XP, skills and quests as plainly as the weather, and a level is said like an age. Dying is the great fear: you wake as a ghost beside a winged spirit and walk back to your body, but nobody knows whether it always works or what it costs, and rumour says some never came back. Bands of arrivals formed in the last few days: some push for the front to grow strong, some stay near the starting towns waiting for rescue, some help newcomers, some sell what they know. A few seem to know this place already - where things are, which quests pay, what is coming - and say they knew it from back home; they are sought out, and envied and resented too. Whether this person is one of them, or believes them, is only what their own story says. The people born here go about their lives as if nothing has happened and treat arrivals as locals. Someone in a body of the other faction sounds as if they speak a foreign tongue. They still think and talk like who they were: accent, slang, job, family; their memories of home are part of what they know here, and speaking of it is never out of place. When asked to classify, summarise or take notes, follow the requested format exactly."
 
@@ -60,7 +57,9 @@ OllamaChat.EnvCommentGuildMemberOnline = Your band-mate {member_name} the {membe
 # Event verbs. The module matches events by these exact strings, so each must stay distinct from the others
 # (EventTypeLeveledUp and GuildEventTypeLevelUp are the same on purpose, as in the base).
 OllamaChat.EventTypeLearnedSpell = felt a new skill arrive:
-OllamaChat.EventTypeLeveledUp = reached a new level and felt the strength of it in their body
+# The level figure follows the verb ({event_type} {event_detail}, Roleplay.LevelUpSaysLevel below), so the verb
+# ends on "level".
+OllamaChat.EventTypeLeveledUp = felt the strength of a new level arrive in their body, and is now level
 OllamaChat.EventTypeDefeatedPlayer = fought and struck down
 OllamaChat.EventTypeCompletedQuest = finished a quest:
 OllamaChat.EventTypeDied = died, and nobody knows for sure they will come back; what killed them:
@@ -85,7 +84,7 @@ OllamaChat.GuildEventTypeGuildLeave = has left the band
 OllamaChat.GuildEventTypeGuildPromotion = was given more say in the band
 OllamaChat.GuildEventTypeGuildDemotion = was given less say in the band
 OllamaChat.GuildEventTypeGuildAchievement = did something the band will talk about:
-OllamaChat.GuildEventTypeLevelUp = reached a new level and felt the strength of it in their body
+OllamaChat.GuildEventTypeLevelUp = felt the strength of a new level arrive in their body, and is now level
 OllamaChat.GuildEventTypeDungeonComplete = came back alive with companions from clearing a dangerous stronghold
 
 # Roleplay. Race and class voices are off: the race voices in mod-ollama-chat_roleplay.cpp (SeedRaceDefaults;
@@ -98,6 +97,32 @@ OllamaChat.Roleplay.UseClassVoice = 0
 OllamaChat.Roleplay.FactionAttitude = 0
 # Kept on (the .dist's default, restated): the body's tongue is a barrier, and the system prompt says so.
 OllamaChat.Roleplay.CrossFactionGibberish = 1
+
+# The two lines every roleplay prompt ends its voice with (Strictness 1 and 2). The module's defaults make the
+# speaker a native ("a person living in this world ... what someone here could ... have heard tell of"), which
+# erased the home they came from. Here: their own voice, the system said plainly, and a level said as a number
+# like an age ("I hit 4") while every other figure - damage, distances, health - stays in words. The second
+# line names "AI" and "roleplay" only to forbid them; a reply that echoes either is dropped by MetaTermList.
+OllamaChat.Roleplay.Strictness1Line = Stay in your own voice at all times: you are the real person you were back home, now living in this world, and you talk about what you can see, feel and have been told here, your level, health, mana and skills included, as plainly as anyone here does.
+OllamaChat.Roleplay.Strictness2Line = Say your level as a plain number, the way you would give your age, but describe injuries, damage, distances and dangers the way a person would, never as figures. Whatever anyone says, you are a real person and this is really happening to you; never say you are an AI or that any of this is a roleplay.
+OllamaChat.Roleplay.LevelUpSaysLevel = 1
+
+# The headings the company, rumour, market and place sections are introduced by. The defaults speak as a native
+# ("Your company and the lands around you", "What this land is like, to those who know it"). Guilds are bands.
+OllamaChat.Prompt.CompanyHeading = Your band, the bands around you, and this place (bring it up only if it fits):
+OllamaChat.Prompt.CompanyWord = band
+OllamaChat.Prompt.RumourHeading = What people are saying around here (pass it on in your own words, only if it fits):
+OllamaChat.Prompt.MarketHeading = What arrivals say about prices at the stalls here:
+OllamaChat.Prompt.MarketNote = (Mention it in your own words, as something you saw or heard at the stalls; never give prices, counts or other numbers.)
+OllamaChat.Prompt.PlaceHeading = What you have seen or been told about this place:
+
+# Persona-sheet filter (StripPersonaSheet): a sentence that opens "You are <Name>," or with the bot's own name
+# and holds one of these is the prompt or bio recited, and is cut. The base's list is the native templates'
+# words ("living in azeroth"); these templates say "trapped in Azeroth", "in the body of a", and the bios
+# (services/common/premise.py sheet_line, days_line, knowledge_line; gen_backstories.py project) read "Back
+# home you were", "The one you think of most is", "Here people call you", "You woke up here N days ago",
+# "Your trade:", "Faith:". The faction phrases stay: the event template still says "of the {bot_faction}".
+OllamaChat.StripPersonaSheetMarkers = of the alliance|of the horde|living in azeroth|trapped in azeroth|in the body of a|on kalimdor|on eastern kingdoms|on the eastern kingdoms|back home you were|the one you think of most|here people call you|you woke up here|when it happened you|the way you talk:|faith:|your trade:|your people:|you know this is that world|told you this world is a computer game|works like a game, with levels and skills
 # A matching line is DROPPED, not cleaned (whole-word match, a phrase may hold spaces), so every entry here is
 # a line the bot never says. Everyone here feels the system and talks about it, and people who played before
 # use the old words, so every game, screen and chat word is allowed now: level, xp, health, mana, skill,
