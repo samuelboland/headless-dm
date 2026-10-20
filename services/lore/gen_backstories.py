@@ -46,7 +46,7 @@ lane (qwen3-8b) for anachronisms a regex can't see. A text the judge still
 flags on the last attempt is kept and written to review-<era>.jsonl.
 
 Usage:
-  python3 gen_backstories.py generate --era classic [--unguilded] [--lanes a,b] [--slots lane=n]
+  python3 gen_backstories.py generate --era classic [--unguilded [--in-world]] [--lanes a,b] [--slots lane=n]
                                       [--limit N] [--no-judge]
   python3 gen_backstories.py sample --era classic [--lanes a,b]
   python3 gen_backstories.py sample-crafts --era classic [--per-lane 2]
@@ -2309,7 +2309,9 @@ def generate(args):
     for gid, name in todo:
         pool.submit("guild", 0, guild_job(int(gid), name), f"guild {gid} {name}")
     if args.unguilded:
-        for c in unguilded_bots(e, "ORDER BY c.guid"):
+        # --in-world: only bots logged in now. A small realm's fixed roster is the bots that log in; the rest
+        # of the account pool never appears, and writing them all costs a rented model for nothing.
+        for c in unguilded_bots(e, ("AND c.online = 1 " if args.in_world else "") + "ORDER BY c.guid"):
             queue_character(c, None, 2)
     log(f"{len(todo)} guild histories queued (members follow each); {len(queued)} characters queued or done")
 
@@ -3429,6 +3431,7 @@ def main():
         p.add_argument("--slots", default="", help="per-lane slot overrides, e.g. z13-qwen35=2,zb-qwen80=0")
     g = sub.choices["generate"]
     g.add_argument("--unguilded", action="store_true")
+    g.add_argument("--in-world", action="store_true", help="with --unguilded: only bots logged in now")
     g.add_argument("--limit", type=int, default=0)
     g.add_argument("--no-judge", action="store_true")
     t = sub.add_parser("traits", help="personality and main motivation for characters that lack them (plan 15)")
