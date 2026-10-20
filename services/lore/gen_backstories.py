@@ -304,6 +304,21 @@ Then write 170 to 210 words in the second person, speaking to them as "you" and 
 
 Reply with ONLY a JSON object, no markdown fences: {{"earth_name": "First Last", "backstory": "the story"}}"""
 
+# The isekai story prompt for a character the player writes for themselves (lore_gate.py), whether from a whole
+# backstory or from a few words about an alt. ISEKAI_CHAR_PROMPT draws a person and has the model choose their
+# real name; here the player has said who they were, so nothing is drawn, and a real name is used only when the
+# player wrote one. Everything else the bots' prompt learned (the openings, the overused names) carries over.
+ISEKAI_PLAYER_CHAR_PROMPT = """{setting}{limits}
+
+Write the story of an ordinary person from the real world who is now {name}, a {gender} {race} {cls} of the {faction}. The player is writing this character for themselves, and what they say below is the truth about who this person was back home: keep every fact of it, and where it says nothing, fill in only plain, ordinary details that cannot contradict it.
+Temperament: {temperament}
+{guild_block}
+{keep_block}"{name}" is what they have gone by here, what the people of this world call them. If the player's words give their real name from back home, use it exactly as written, and the story uses both names. If they do not, give them none: do not invent one, and call them only "{name}".
+
+Then write 170 to 210 words in the second person, speaking to them as "you" and "your". Open somewhere in the life before that belongs to this person alone, and vary the shape of the first sentence: it must not always be "You" followed by a verb, it must not open on waking up here, and it must not open on a scar, a habit, a kept object or a remembered smell. Never begin with "You were born", "You still", "You return", "You keep", "You trace", "Your left", "Your fingers", "Your knuckles" or "The scar". Cover: the life before, your work and the people you left behind; the moment it happened; waking up as a {gender} {race} {cls}, in a body that is not yours and with a {cls}'s reflexes you do not understand yet, in {start}; the first few days{death_hint}; {guild_reason}; one thing you want most and one thing you fear. {knowledge_task} {relation_line} You are a few days in and at the very start of the road: untrained, with no great deeds, no battles of note and no history in this world. End with one sentence on how you talk: your real accent and way of speaking from home. Give invented people from home ordinary American or Canadian names that fit their age, never famous or real people; people born in this world have its names. Plain prose only: no title, no lists.
+
+Reply with ONLY a JSON object, no markdown fences: {{"earth_name": "their real name exactly as the player wrote it, or null if the player gave none", "home": "where back home they are from, in the player's own words, or null if the player did not say", "backstory": "the story"}}"""
+
 # Where each people's newcomers wake: the starting lands of the game, and the nearest town they walk to first.
 ISEKAI_START = {
     1: "Northshire Abbey in Elwynn Forest, with Goldshire down the road and Stormwind beyond it",
@@ -413,6 +428,14 @@ def isekai_char_prompt(c, temper, guild, e, bond=None, main_name=None, concept=N
     died = premise.rng_for(c["guid"], "died").random() < 0.4
     death_hint = (", including the first time you died and walked back to your body as a ghost" if died else
                   ", and how close you have come to dying")
+    if o.get("player"):
+        return ISEKAI_PLAYER_CHAR_PROMPT.format(
+            keep_block=keep_block, setting=premise.setting(e), limits=e["limits"], name=c["name"],
+            gender="female" if c["gender"] else "male", race=race, cls=cls, faction=faction,
+            temperament=temper[1], guild_block=guild_block,
+            start=ISEKAI_START.get(c["race"], "their people's homeland"), death_hint=death_hint,
+            guild_reason=guild_reason, knowledge_task=KNOWS_TASK[premise.PLAYER_KNOWS_GAME],
+            relation_line=relation_line)
     return ISEKAI_CHAR_PROMPT.format(
         keep_block=keep_block, setting=premise.setting(e), limits=e["limits"], name=c["name"],
         gender="female" if c["gender"] else "male", race=race, cls=cls, faction=faction,
@@ -536,11 +559,65 @@ def check_earth_name(earth, c, text):
     return earth
 
 
-def ask_backstory(lane, c, prompt, max_tokens, context, words_range=(70, 300)):
+PLAYER_NAME_RE = re.compile(r"[A-Z][a-zA-Z'\-]+(?: [A-Z][a-zA-Z'\-]+){0,2}")
+NULLISH = ("", "null", "none", "n/a", "unknown")
+
+
+def player_origin():
+    """The origin a player's character is written to: premise.player_origin under isekai, nothing under native."""
+    return premise.player_origin() if premise.is_isekai() else None
+
+
+def player_knows():
+    """What a player's character knows of the game, for vet(): they are playing it. 0 under native, which
+    vet() and judge_prompt() ignore there, so passing it changes nothing on a native realm."""
+    return premise.PLAYER_KNOWS_GAME if premise.is_isekai() else 0
+
+
+def check_player_earth_name(earth, c, text, source):
+    """The real name a player gave their character, or None when they gave none.
+
+    Unlike check_earth_name, the model does not get to choose it: a name from home is the player's to give, and
+    one they never wrote would follow the character into every prompt. So it must be in the player's own words,
+    and in the story; and the story must still say the name they go by here.
+    """
+    if not re.search(rf"\b{re.escape(c['name'])}\b", text, re.I):
+        raise ValueError(f"story never says the name {c['name']!r} they go by here")
+    earth = re.sub(r"\s+", " ", str(earth or "").translate(ASCII_PUNCT)).strip().strip('"')
+    if earth.lower() in NULLISH:
+        return None
+    if not PLAYER_NAME_RE.fullmatch(earth):
+        raise ValueError(f"earth name is not a name: {earth!r}")
+    if earth.lower() not in (source or "").lower():
+        raise ValueError(f"earth name {earth!r} is not in your words")
+    first = earth.split()[0]
+    if not re.search(rf"\b{re.escape(first)}\b", text):
+        raise ValueError(f"story never says the earth name {first!r}")
+    return earth
+
+
+def given_home(home, source):
+    """Where back home the player said they are from, kept only as far as their own words say it.
+
+    The model is asked to quote it, and paraphrases anyway ("Toledo" comes back "Toledo, Ohio"), so each
+    comma-separated part is kept only when it is in the player's words. This is a label on the row, not text
+    anyone reads, so a miss is dropped rather than refused.
+    """
+    home = re.sub(r"\s+", " ", str(home or "")).strip().strip('"')
+    if home.lower() in NULLISH:
+        return None
+    said = (source or "").lower()
+    parts = [p.strip() for p in home.split(",") if p.strip() and p.strip().lower() in said]
+    return ", ".join(parts) or None
+
+
+def ask_backstory(lane, c, prompt, max_tokens, context, words_range=(70, 300), source=None):
     """One backstory call, checked. Returns (text, origin); origin is None under native.
 
     Native is exactly the old call: plain prose in, check_backstory out. Under isekai the reply is JSON, so the
     real name the model chose comes back apart from the story and can be stored in lore_character.origin.
+    For a character the player writes (origin from player_origin), `source` is the player's own words, and the
+    name and home are kept only as the player gave them.
     """
     if not premise.is_isekai():
         return check_backstory(lane.chat([{"role": "user", "content": prompt}], max_tokens, context=context),
@@ -549,6 +626,11 @@ def ask_backstory(lane, c, prompt, max_tokens, context, words_range=(70, 300)):
     data = extract_json(lane.chat([{"role": "user", "content": prompt}], max_tokens + 150, context=context))
     text = check_backstory(str(data.get("backstory") or ""), words_range)
     o = dict(origin_of(c))
+    if o.get("player"):
+        o["earth_name"] = check_player_earth_name(data.get("earth_name"), c, text, source)
+        o["home"] = given_home(data.get("home"), source)
+        o["country"] = premise.home_country(o["home"])
+        return text, o
     o["earth_name"] = check_earth_name(data.get("earth_name"), c, text)
     return text, o
 
@@ -559,6 +641,18 @@ def origin_columns(o):
         return "", ""
     return (", premise, origin, knows_game",
             f", {q(premise.ISEKAI)}, {q(json.dumps(o, ensure_ascii=False))}, {int(o.get('knows_game', 0))}")
+
+
+def origin_again(o):
+    """The ON DUPLICATE KEY UPDATE tail that goes with origin_columns; empty under native.
+
+    Under isekai a rewritten story is a person drawn again from home, so what they know of the game starts
+    over from the draw: whoever told the old story about the game did not tell this one.
+    """
+    if o is None:
+        return ""
+    return (", premise = VALUES(premise), origin = VALUES(origin), knows_game = VALUES(knows_game), "
+            "knows_game_from = NULL")
 
 
 # ---------------------------------------------------------------------------
@@ -1939,7 +2033,9 @@ def isekai_life_prompt(c, e, dead_block):
     """LIFE_PROMPT under the isekai premise: the same trade, read from character_skills, as something learned here."""
     o = origin_of(c)
     trades = c["trades"]
-    job = f"{'an' if o['job'][0] in 'aeiouAEIOU' else 'a'} {o['job']}"
+    # A player's character has no drawn job (premise.player_origin); their story says what work they did.
+    job = (f"{'an' if o['job'][0] in 'aeiouAEIOU' else 'a'} {o['job']}" if o.get("job")
+           else "whatever your story says you did back home")
     if trades:
         named = ", ".join(t[0] for t in trades)
         texture = "; ".join(f"{t[0]}: {t[1]}" for t in trades)
@@ -2514,6 +2610,43 @@ BOND_KINDS = {
                          gloss="you knew each other before the war, and it is not spoken of now"),
 }
 
+# The same kinds under the isekai premise, with the same weights and the same rules, told as what can be between
+# two people who woke up here a few days ago. Two of them reach back home: kin is family who came through too,
+# and sworn is someone known before (a best friend, a partner, an ex, a coworker). Kin no longer needs the same
+# race, because a body here is not inherited; it still needs the same side, since a few days at the start of
+# the road is not long enough to find someone across the world. distant keeps the other side.
+ISEKAI_BOND_KINDS = dict(
+    BOND_KINDS,
+    kin=dict(need="faction", weight=3,
+             gloss="family from back home who came through too: a brother or sister, a cousin, a parent or a "
+                   "grown child, in a body neither of you would have known"),
+    sworn=dict(need="faction", weight=2,
+               gloss="someone you knew back home who came through too - a best friend, a partner, an ex, a "
+                     "roommate, a coworker - and you have sworn not to lose each other again"),
+    debt=dict(need="faction", weight=2,
+              gloss="in these first days they kept you alive, or got you back to your body, and the debt is "
+                    "not yet paid"),
+    mentor=dict(need="faction", weight=1,
+                gloss="you showed them something you had worked out about this world, or about these bodies"),
+    pupil=dict(need="faction", weight=1,
+               gloss="they showed you something they had worked out about this world, or about these bodies"),
+    comrade=dict(need="faction", weight=2,
+                 gloss="you woke up near each other and got through the first days together"),
+    retainer=dict(need="faction", weight=1,
+                  gloss="you have attached yourself to them: you follow their lead and do what they ask"),
+    acquaintance=dict(need="faction", weight=2,
+                      gloss="you met by chance in these first days, on the road or in a town, and swore nothing "
+                            "to each other"),
+    distant=dict(need="cross", weight=1,
+                 gloss="you knew each other back home, and woke up on opposite sides; it is not spoken of now"),
+)
+
+
+def bond_kinds():
+    """BOND_KINDS for this realm's premise. Native gets the table itself, so nothing about it changes there."""
+    return ISEKAI_BOND_KINDS if premise.is_isekai() else BOND_KINDS
+
+
 # Plan 21 §5. The bond is a story; this is the feeling it implies, so an alt walks up to its main already
 # knowing them instead of as a stranger. `acquaintance` is 25 (2026-09-16): above `distant`, because they did
 # choose to stay near, and well under the kinds that carry an obligation, because it swore nothing.
@@ -2536,6 +2669,25 @@ soften it into something warmer or sadder, and do not replace it with grief, pit
 Name {main_name}. Keep strictly to what is given above: invent no deeds for {main_name}, give them no words or
 feelings that are not written, and settle nothing that is left open. Plain prose only: no title, no lists, no
 quotes around it."""
+
+# The bond prompt under the isekai premise: the same blocks and the same rules, for two people a few days in.
+# What came before, if anything did, happened back home; nothing between them here is older than the waking.
+ISEKAI_BOND_PROMPT = """{setting}{limits}
+
+{main_name} is what one of these arrivals goes by here: a {main_gender} {main_race} {main_cls} of the {faction}. What is known of them:
+{main_sheet}
+
+Write for {name}, a {gender} {race} {cls} of the {faction}: another ordinary person from the United States or Canada, who woke up in that body a few days ago at the very start of the road.
+
+What is between them: {gloss}.
+{concept_block}{others_block}
+Where the player's own words say what draws {name} to {main_name}, keep that reason exactly as they put it. Do not
+soften it into something warmer or sadder, and do not replace it with grief, pity or admiration of character.
+{keep_block}Write {lo} to {hi} words in the second person, addressed to {name}, saying what is between you and {main_name}.
+Name {main_name}. Whatever is between you here is a few days old; anything older happened back home. No years
+together in this world, no battles, no deeds. Keep strictly to what is given above: invent no deeds for
+{main_name}, give them no words or feelings that are not written, and settle nothing that is left open. Write
+numbers out in words. Plain prose only: no title, no lists, no quotes around it."""
 
 BOND_WORDS = (30, 80)
 BOND_TARGET = (40, 65)
@@ -2566,7 +2718,7 @@ def allowed_kinds(alt, main):
     same_race = alt["race"] == main["race"]
     same_faction = (alt["race"] in HORDE) == (main["race"] in HORDE)
     out = []
-    for kind, spec in BOND_KINDS.items():
+    for kind, spec in bond_kinds().items():
         if spec["need"] == "race" and not same_race:
             continue
         if spec["need"] == "faction" and not same_faction:
@@ -2624,6 +2776,21 @@ KIND_WORDS = {
 }
 
 
+# The isekai bonds are told in other words: a promise rather than a shield-oath, waking up together rather than
+# a campaign. Each list keeps the native words, so a bond that would pass there passes here too.
+ISEKAI_KIND_WORDS = dict(
+    KIND_WORDS,
+    kin=KIND_WORDS["kin"] + ("son", "daughter"),
+    sworn=KIND_WORDS["sworn"] + ("promise", "promised"),
+    comrade=KIND_WORDS["comrade"] + ("together", "woke", "first days", "side by side"),
+    acquaintance=KIND_WORDS["acquaintance"] + ("road", "town"),
+    mentor=KIND_WORDS["mentor"] + ("worked out", "figured"),
+    pupil=KIND_WORDS["pupil"] + ("worked out", "figured"),
+    retainer=KIND_WORDS["retainer"] + ("follow", "lead"),
+    distant=KIND_WORDS["distant"] + ("back home",),
+)
+
+
 def _shingles(text, n=6):
     words = re.findall(r"[a-z']+", text.lower())
     return {" ".join(words[i:i + n]) for i in range(max(0, len(words) - n + 1))}
@@ -2631,7 +2798,7 @@ def _shingles(text, n=6):
 
 def check_bond_extra(text, kind, keep, other_bonds):
     """What check_bond cannot see: the kind actually written, the player's words, and plain copying."""
-    need = KIND_WORDS.get(kind)
+    need = (ISEKAI_KIND_WORDS if premise.is_isekai() else KIND_WORDS).get(kind)
     if need and not any(w in text.lower() for w in need):
         raise ValueError(f"never says it is {kind} (looked for {', '.join(need[:4])}...)")
     missing = [k for k in keep if k.lower() not in text.lower()]
@@ -2649,8 +2816,14 @@ def check_bond_extra(text, kind, keep, other_bonds):
 
 
 def build_bond(lane, c, m, kind, concept, others, e, keep=()):
-    facts = m["sheet"] or (f"{m['name']} is spoken of little. Say nothing of their deeds, for none are known "
-                           f"to you beyond the name and the face.")
+    isekai = premise.is_isekai()
+    if isekai:
+        facts = m["sheet"] or (f"{m['name']} has said little about themselves. Say nothing of their life back "
+                               f"home or of anything they have done, for none of it is known to you beyond the "
+                               f"name and the face.")
+    else:
+        facts = m["sheet"] or (f"{m['name']} is spoken of little. Say nothing of their deeds, for none are known "
+                               f"to you beyond the name and the face.")
     concept_block = f"\nWhat the player says is true of {c['name']}:\n{concept.strip()}\n" if concept else ""
     others_block = ""
     if others:
@@ -2662,15 +2835,15 @@ def build_bond(lane, c, m, kind, concept, others, e, keep=()):
     # Ask for the words the check will demand. Checking for words the prompt never requested is just guessing:
     # six straight attempts failed on "cousin" and "wealth" because nothing ever told the model to use them.
     keep_block = ("These exact words must appear in what you write: " + ", ".join(keep) + ".\n\n") if keep else ""
-    prompt = BOND_PROMPT.format(
+    prompt = (ISEKAI_BOND_PROMPT if isekai else BOND_PROMPT).format(
         keep_block=keep_block,
-        setting=e["setting"], limits=e["limits"], main_name=m["name"],
+        setting=premise.setting(e) if isekai else e["setting"], limits=e["limits"], main_name=m["name"],
         main_gender="female" if m["gender"] else "male", main_race=RACES.get(m["race"], "unknown"),
         main_cls=CLASSES.get(m["cls"], "adventurer"), main_sheet=facts,
         faction="Horde" if c["race"] in HORDE else "Alliance", name=c["name"],
         gender="female" if c["gender"] else "male", race=RACES.get(c["race"], "unknown"),
         cls=CLASSES.get(c["cls"], "adventurer"), standing=eras.standing(c["level"], e),
-        gloss=BOND_KINDS[kind]["gloss"], concept_block=concept_block, others_block=others_block,
+        gloss=bond_kinds()[kind]["gloss"], concept_block=concept_block, others_block=others_block,
         lo=BOND_TARGET[0], hi=BOND_TARGET[1])
     raw = lane.chat([{"role": "user", "content": prompt}], 400, temperature=0.7,
         context={
@@ -2704,10 +2877,7 @@ def gen_alt_backstory(lane, attempt, e, judge, c, temper, bond, m, concept="", k
         raise ValueError("dropped: " + ", ".join(missing))
     vet(text, e, judge, attempt, f"alt {c['guid']} {c['name']}", (o or {}).get("knows_game", 0))
     cols, vals = origin_columns(o)
-    # Under isekai a rewritten story is a person drawn again from home, so what they know of the game starts
-    # over from the draw: whoever told the old story about the game did not tell this one.
-    again = (", premise = VALUES(premise), origin = VALUES(origin), knows_game = VALUES(knows_game), "
-             "knows_game_from = NULL") if o else ""
+    again = origin_again(o)
     sql(f"INSERT INTO lore_character (guid, guildid, temperament, backstory, model, era{cols}) VALUES "
         f"({c['guid']}, NULL, {q(temper[0])}, {q(text)}, {q((lane.name + ':' + lane.model)[:64])}, "
         f"{q(e['name'])}{vals}) ON DUPLICATE KEY UPDATE backstory = VALUES(backstory), "
@@ -2942,6 +3112,41 @@ sentences with their name.
 Return only the paragraph.
 """
 
+# The sheet under the isekai premise. The player is an arrival like everyone else, and the one who certainly
+# knows the game, so the account it keeps is a life back home, the waking and these first days; what it refuses
+# is the same as ever (new names, deeds, an ending), plus any history in this world longer than the days since.
+ISEKAI_MAIN_SHEET_PROMPT = """{setting}
+
+Write a short sheet about one of these arrivals, for those who know them to read. It is not a story and not a
+boast: it is what someone who had spent these first days with {name} would be able to tell you about them.
+
+{name} is what they go by here: a {race} {cls} of the {faction}, a few days in and at the very start of the road.
+They are an ordinary person from the United States or Canada, and they played World of Warcraft back home, so
+they know this world is the game's.
+
+Their own account of themselves is below. Keep every fact of it: their real name and where they are from, if
+they give them; the life they had back home, the people they left there and the work they did; the moment it
+happened and how they woke up here; what these first days have been like; how they are with other people; and
+what they are trying to do now. Invent nothing that is not there. Give them no new names, no deeds, no battles,
+no years in this world, and no ending to the things left unresolved. Whatever they say of the game stays what
+it is: things the game had, not things that have happened here.
+
+Be especially careful with what they want. Keep their aim at its full size, in their own measure: do not shrink
+it, do not have them deny it or call it no great plan, and do not hand them some other reason for it than the
+one they give. If they mean to get home, to find someone, or to make something of this life, then say so
+plainly.
+
+---
+{source}
+---
+
+Write one paragraph of {lo} to {hi} words, in the third person, about them. Never address the reader: no "you"
+and no "your". Plain speech: no grand words, and numbers written out in words, never as figures. Do not begin
+two sentences with their name.
+
+Return only the paragraph.
+"""
+
 # What the check accepts, and what the prompt asks for. They are deliberately different: the models overshoot a
 # stated maximum, so the ask is the narrower band.
 #
@@ -2982,8 +3187,9 @@ def check_main_sheet(text, name, anchors, source="", race=""):
 
 
 def build_main_sheet(lane, c, e, source):
-    prompt = MAIN_SHEET_PROMPT.format(
-        setting=e["setting"], name=c["name"], race=RACES.get(c["race"], "unknown"),
+    isekai = premise.is_isekai()
+    prompt = (ISEKAI_MAIN_SHEET_PROMPT if isekai else MAIN_SHEET_PROMPT).format(
+        setting=premise.setting(e) if isekai else e["setting"], name=c["name"], race=RACES.get(c["race"], "unknown"),
         cls=CLASSES.get(c["cls"], "wanderer"), faction="Horde" if c["race"] in HORDE else "Alliance",
         standing=eras.standing(c["level"], e), source=source.strip(),
         lo=MAIN_SHEET_TARGET[0], hi=MAIN_SHEET_TARGET[1])
@@ -3030,7 +3236,7 @@ def main_sheet(args):
         try:
             text = check_main_sheet(build_main_sheet(lane, c, e, source), c["name"], anchors,
                                     source, RACES.get(c["race"], ""))
-            vet(text, e, judge, attempt, f"main sheet {c['guid']} {c['name']}")
+            vet(text, e, judge, attempt, f"main sheet {c['guid']} {c['name']}", player_knows())
             break
         except ValueError as err:
             log(f"attempt {attempt}: {err}")

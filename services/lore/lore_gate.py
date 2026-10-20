@@ -113,6 +113,10 @@ def log(msg):
 # pipeline's messages are already the right shape; they only need rewording for a human.
 def humanise(message, era_name):
     m = str(message)
+    if g.premise.is_isekai():
+        said = _humanise_isekai(m)
+        if said:
+            return said
     hit = re.match(r"out-of-world term: '(.+)'", m)
     if hit:
         return (f"“{hit.group(1)}” belongs to a later age than this one. "
@@ -150,6 +154,51 @@ def humanise(message, era_name):
     if "never says it is" in m:
         return (f"{m}. The tie has to actually say what it is.", False)
     return (m, False)
+
+
+def _humanise_isekai(m):
+    """humanise's answers that change under the isekai premise, or None to fall through to the native ones.
+
+    The native ones teach a world with no outside, where a game word is the thing that breaks it. Here the
+    player is an arrival too, and knows it is the game; what breaks this world is a life in it older than the
+    waking, which is what get_era's isekai pattern finds and these say in plain words.
+    """
+    hit = re.match(r"out-of-world term: '(.+)'", m)
+    if hit:
+        term = hit.group(1)
+        if re.match(r"(?:born|raised|grew up)\b", term, re.I):
+            return (f"“{term}” gives them a life in this world before now. Nobody was born here: everyone, "
+                    f"you included, was born and raised back home and woke up in Azeroth a few days ago, in a "
+                    f"body that is not their own.", True)
+        if re.match(r"(?:years|decades|months)\b", term, re.I):
+            return (f"“{term}” is longer than anyone has been here. Everyone woke up in Azeroth a few days "
+                    f"ago.", True)
+        if re.search(r"\bwar\b", term, re.I):
+            return (f"“{term}” puts them in this world's wars. Those were fought before anyone arrived, and a "
+                    f"few days in, nobody here has fought in one.", True)
+        return (f"“{term}” has not happened in this world yet. If they know it from the game, say it that way: "
+                f"as something the game had, not something that has happened here.", True)
+    hit = re.match(r"judge: (.+)", m)
+    if hit:
+        return (f"A careful reader caught something this world cannot hold for someone a few days in: "
+                f"{hit.group(1)}.", True)
+    if "carries a figure" in m:
+        return ("It carries a number written as figures. Write numbers out in words, the way you would say "
+                "them.", True)
+    hit = re.match(r"earth name '(.+)' is not in your words", m)
+    if hit:
+        return (f"The shaping gave them a name from back home that you never wrote: {hit.group(1)}. Their real "
+                f"name is yours to give, so this was not kept.", False)
+    if m.startswith("earth name is not a name"):
+        return ("Their name from back home came out garbled. Write it as a first and last name, or leave it "
+                "out.", False)
+    hit = re.match(r"story never says the earth name '(.+)'", m)
+    if hit:
+        return (f"The story lost the real name you gave them ({hit.group(1)}), so this was not kept.", False)
+    hit = re.match(r"story never says the name '(.+)' they go by here", m)
+    if hit:
+        return (f"The story never called them {hit.group(1)}, the name they go by here.", False)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -206,23 +255,29 @@ def shape(char, what, text, era_name, keep):
 
     Stores nothing. `what` is 'sheet' (a real player's own character) or 'backstory' (an alt).
     """
-    e = eras.get(era_name)
+    e = g.get_era(era_name)
     refusals, advice = [], []
     prose = None
+    # Under isekai the player is playing the game and knows it, so game words are theirs to use (g.meta_for).
+    knows = g.player_knows()
 
     # The player's OWN words come first, before any model call. Two reasons, both learned the hard way on
     # 2026-09-16: a source naming the Wrathgate was refused four times over for names the *model* had added,
     # so the player was told about "Lira" and never about their own era break; and four attempts were spent
     # on a source that could never pass. What the player wrote is what ripples, so it is what is checked.
-    bad = e["meta"].search(text)
+    bad = g.meta_for(e, knows).search(text)
     if bad:
         said, _ = humanise(f"out-of-world term: '{bad.group(0)}'", era_name)
         return None, [said], []
 
     lane = fleet.prefer_lanes(DEFAULT_LANE)[0]
     judge = fleet.Judge()
+    said = _isekai_judged(text, e, judge, knows)
+    if said:
+        return None, [said], []
 
     for attempt in range(1, fleet.MAX_ATTEMPTS + 1):
+        origin = None
         try:
             if what == "sheet":
                 raw = g.build_main_sheet(lane, dict(name=char["name"], race=_race_id(char),
@@ -236,24 +291,58 @@ def shape(char, what, text, era_name, keep):
                 main = g.main_of(char["guid"])
                 c = dict(guid=char["guid"], name=char["name"], race=_race_id(char), cls=_class_id(char),
                          gender=0, level=char["level"], rname=None)
+                if g.premise.is_isekai():
+                    c["origin"] = g.player_origin()
                 temper = g.temperaments()[0]
                 prompt = g.char_prompt(c, temper, None, e, bond=bond[0][0], main_name=main["name"],
                                        concept=text, main_sheet=main["sheet"], keep=keep)
-                prose = g.check_backstory(lane.chat([{"role": "user", "content": prompt}], 600,
+                # ask_backstory is the plain call under native; under isekai it reads the JSON reply, and keeps a
+                # real name and a home only as the player wrote them (source=text).
+                prose, origin = g.ask_backstory(lane, c, prompt, 600,
                     context={
                         "purpose": "player_lore",
                         "source": "lore/lore_gate.py",
                         "stage": "shape",
                         "route": "batch",
-                    }),
-                                          g.ALT_STORY_WORDS)
-            g.vet(prose, e, judge, attempt, f"gate {char['guid']} {char['name']}")
+                    }, words_range=g.ALT_STORY_WORDS, source=text)
+            g.vet(prose, e, judge, attempt, f"gate {char['guid']} {char['name']}", knows)
+            if origin is not None:
+                _drafted[char["guid"]] = (_digest(prose), origin)
             break
         except ValueError as err:
             said, hard = humanise(err, era_name)
             (refusals if hard else advice).append(said)
             prose = None
     return prose, _unique(refusals), _unique(advice)
+
+
+# What the last draft found out about who the player's character was back home (under isekai: the real name and
+# the home they gave), by character, with the digest of the prose it came with, so /commit can store it beside
+# the prose the player kept. The page posts back only the prose, and a name is not something to fish back out
+# of it. One per character, so it cannot grow; lost on a restart, which leaves those fields empty, not wrong.
+_drafted = {}
+
+
+def _digest(text):
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def _isekai_judged(text, e, judge, knows):
+    """Under isekai, what the judge finds wrong with the player's OWN words, in plain words; None if nothing.
+
+    The pattern finds "born in Goldshire" and "years in Azeroth", but not years of adventuring said any other
+    way, or a famous hero three days in, and those are the very things this premise refuses. Left to the shaped
+    prose, they are either quietly shaped away (the player's words lost) or, on vet()'s last attempt, only noted
+    for review and kept. So the player's own words go to the judge first, as they already go to the pattern.
+    Native never asks: there, the pattern on the source and the judge on the prose are the rule as it stands.
+    """
+    if not g.premise.is_isekai() or not judge:
+        return None
+    evidence = judge.check(g.judge_prompt(e, text, knows), context={
+        "purpose": "player_lore", "source": "lore/lore_gate.py", "stage": "judge_source", "route": "batch"})
+    if not evidence:
+        return None
+    return humanise(f"judge: {evidence}", ERA)[0]
 
 
 def _unique(items):
@@ -291,10 +380,16 @@ def commit(char, what, prose, source, era_name):
                       f"WHERE la.main_guid = {char['guid']} AND (la.sheet_hash IS NULL OR la.sheet_hash <> '{digest}')")
         return [r[0] for r in stale]
     temper = g.temperaments()[0]
-    g.sql("INSERT INTO lore_character (guid, guildid, temperament, backstory, source, model, era) VALUES "
+    # Under isekai the row says whose premise it was written for, that its person knows the game (the player
+    # does), and what the player told the draft of who they were. Under native all three are empty strings.
+    digest_then, origin = _drafted.pop(char["guid"], (None, None))
+    if digest_then != _digest(prose):
+        origin = g.player_origin()
+    cols, vals = g.origin_columns(origin)
+    g.sql(f"INSERT INTO lore_character (guid, guildid, temperament, backstory, source, model, era{cols}) VALUES "
           f"({char['guid']}, NULL, {g.q(temper[0])}, {g.q(prose)}, {g.q(source)}, {g.q(lane_model)}, "
-          f"{g.q(era_name)}) ON DUPLICATE KEY UPDATE backstory = VALUES(backstory), "
-          f"source = VALUES(source), model = VALUES(model), era = VALUES(era)", fetch=False)
+          f"{g.q(era_name)}{vals}) ON DUPLICATE KEY UPDATE backstory = VALUES(backstory), "
+          f"source = VALUES(source), model = VALUES(model), era = VALUES(era){g.origin_again(origin)}", fetch=False)
     return []
 
 
@@ -415,14 +510,19 @@ def _suggest(c, m, e, allowed):
     first, where it can be argued with.
     """
     rng = random.Random()
-    kind = rng.choices(allowed, weights=[g.BOND_KINDS[k]["weight"] for k in allowed])[0] if allowed else ""
+    kinds = g.bond_kinds()
+    kind = rng.choices(allowed, weights=[kinds[k]["weight"] for k in allowed])[0] if allowed else ""
     tempers = g.temperaments()
     temper = rng.choice(tempers)[0] if tempers else ""
     race = g.RACES.get(c["race"], "").lower()
     cls = g.CLASSES.get(c["cls"], "adventurer").lower()
-    words = f"{c['name']} is a {race} {cls}, {eras.standing(c['level'], e)}.".replace("  ", " ")
+    if g.premise.is_isekai():
+        # Under isekai the level says nothing of who they are yet; what does is that they woke up in that body.
+        words = f"{c['name']} is a {race} {cls}: someone from back home who woke up in that body a few days ago."
+    else:
+        words = f"{c['name']} is a {race} {cls}, {eras.standing(c['level'], e)}.".replace("  ", " ")
     if kind:
-        words += f" Between them and {m['name']}: {g.BOND_KINDS[kind]['gloss']}."
+        words += f" Between them and {m['name']}: {kinds[kind]['gloss']}."
     if temper:
         # Not "like a {x}": the keys are adjectives and nouns mixed, so the article breaks on half of them
         # ("like a grieving", "like a cheerful"). This is the phrasing the panel already uses as its heading.
@@ -432,7 +532,7 @@ def _suggest(c, m, e, allowed):
 
 def alt_options(char):
     """What this alt may be to its main, and what it already carries."""
-    e = eras.get(ERA)
+    e = g.get_era(ERA)
     c = _row(char)
     m = g.main_of(char["guid"])
     if not c or not m:
@@ -445,7 +545,7 @@ def alt_options(char):
     allowed = g.allowed_kinds(c, m)
     return dict(
         character=char["name"], main=m["name"], level=c["level"], main_level=main_level,
-        kinds=[dict(kind=k, gloss=g.BOND_KINDS[k]["gloss"]) for k in allowed],
+        kinds=[dict(kind=k, gloss=g.bond_kinds()[k]["gloss"]) for k in allowed],
         suggest=_suggest(c, m, e, allowed),
         temperaments=[t[0] for t in g.temperaments()],
         has_bond=bool(char["bond_kind"]), bond_kind=char["bond_kind"],
@@ -521,10 +621,20 @@ def _note_attempt(job, err, what, attempt):
 
 def write_alt(job, char, kind, temperament, concept, keep, keep_story):
     """The tie, then the story built around it. Stores nothing at all."""
-    e = eras.get(ERA)
+    e = g.get_era(ERA)
     c, m = _row(char), g.main_of(char["guid"])
     lane, _, judge = _lanes()
     rng = random.Random()
+    knows = g.player_knows()
+    if g.premise.is_isekai():
+        c["origin"] = g.player_origin()
+        # The player's words about this alt are checked before anything is written from them, as a draft's are.
+        bad = g.meta_for(e, knows).search(concept)
+        said = (humanise(f"out-of-world term: '{bad.group(0)}'", ERA)[0] if bad
+                else _isekai_judged(concept, e, judge, knows))
+        if said:
+            job["refusals"] = [said]
+            return _finish(job, "failed", "What you wrote about them breaks this world, so nothing was written.")
 
     other_rows = g.sql("SELECT c2.name, la.kind, la.bond FROM lore_alt la "
                        "JOIN characters c2 ON c2.guid = la.guid "
@@ -536,7 +646,7 @@ def write_alt(job, char, kind, temperament, concept, keep, keep_story):
         return _finish(job, "failed", f"{char['name']} cannot be {kind} to {m['name']}. "
                                       f"What they could be: {', '.join(allowed)}.")
     if not kind:
-        kind = rng.choices(allowed, weights=[g.BOND_KINDS[k]["weight"] for k in allowed])[0]
+        kind = rng.choices(allowed, weights=[g.bond_kinds()[k]["weight"] for k in allowed])[0]
         job["drawn_kind"] = True
     job["kind"], job["pinned"] = kind, 0 if job.get("drawn_kind") else 1
 
@@ -545,7 +655,7 @@ def write_alt(job, char, kind, temperament, concept, keep, keep_story):
         try:
             bond = g.build_bond(lane, c, m, kind, concept, others, e, keep)
             g.check_bond_extra(bond, kind, keep, other_bonds)
-            g.vet(bond, e, judge, attempt, f"gate bond {c['guid']} {c['name']}")
+            g.vet(bond, e, judge, attempt, f"gate bond {c['guid']} {c['name']}", knows)
             job["bond"] = bond
             break
         except ValueError as err:
@@ -570,16 +680,17 @@ def write_alt(job, char, kind, temperament, concept, keep, keep_story):
         try:
             prompt = g.char_prompt(c, temper, None, e, bond=job["bond"], main_name=m["name"],
                                    concept=concept, main_sheet=m["sheet"], keep=keep_story)
-            story = g.check_backstory(lane.chat([{"role": "user", "content": prompt}], 600,
+            story, origin = g.ask_backstory(lane, c, prompt, 600,
                 context={
                     "purpose": "player_lore",
                     "source": "lore/lore_gate.py",
                     "stage": "write_alt",
                     "route": "batch",
-                }),
-                                      g.ALT_STORY_WORDS)
-            g.vet(story, e, judge, attempt, f"gate story {c['guid']} {c['name']}")
+                }, words_range=g.ALT_STORY_WORDS, source=concept)
+            g.vet(story, e, judge, attempt, f"gate story {c['guid']} {c['name']}", knows)
             job["story"] = story
+            if origin is not None:
+                job["origin"] = origin
             break
         except ValueError as err:
             _note_attempt(job, err, "story", attempt)
@@ -591,14 +702,15 @@ def write_alt(job, char, kind, temperament, concept, keep, keep_story):
 
 def keep_alt(job, char, src, concept):
     """Store what was read and approved, then everything that follows from it."""
-    e = eras.get(ERA)
+    e = g.get_era(ERA)
     c, m = _row(char), g.main_of(char["guid"])
     _, trait_lane, judge = _lanes()
     bond, story, kind, temper = src["bond"], src["story"], src["kind"], src["temperament"]
+    origin = src.get("origin") or g.player_origin()
 
     # Never store unchecked prose, even our own: the hard check runs again on exactly what goes in.
     for text in (bond, story):
-        bad = e["meta"].search(text)
+        bad = g.meta_for(e, g.player_knows()).search(text)
         if bad:
             said, _ = humanise(f"out-of-world term: '{bad.group(0)}'", ERA)
             return _finish(job, "failed", said)
@@ -612,11 +724,12 @@ def keep_alt(job, char, src, concept):
           f"source = VALUES(source), model = VALUES(model), era = VALUES(era)", fetch=False)
 
     _step(job, "Setting down their story.")
-    g.sql("INSERT INTO lore_character (guid, guildid, temperament, backstory, source, model, era) VALUES "
+    cols, vals = g.origin_columns(origin)
+    g.sql(f"INSERT INTO lore_character (guid, guildid, temperament, backstory, source, model, era{cols}) VALUES "
           f"({c['guid']}, NULL, {g.q(temper)}, {g.q(story)}, {g.q(concept)}, {g.q('player+gate')}, "
-          f"{g.q(e['name'])}) ON DUPLICATE KEY UPDATE temperament = VALUES(temperament), "
+          f"{g.q(e['name'])}{vals}) ON DUPLICATE KEY UPDATE temperament = VALUES(temperament), "
           f"backstory = VALUES(backstory), source = VALUES(source), model = VALUES(model), "
-          f"era = VALUES(era)", fetch=False)
+          f"era = VALUES(era){g.origin_again(origin)}", fetch=False)
 
     # Traits UPDATE the row the story just made. Without it they write nothing and report success.
     _step(job, "Giving them a way of being in a room, and something to live for.")
@@ -716,7 +829,10 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authed():
             return
         if self.path.startswith("/rules"):
-            e = eras.get(ERA)
+            e = g.get_era(ERA)
+            if g.premise.is_isekai():
+                return self._send(200, {"ok": True, "era": ERA, "premise": g.premise.ISEKAI,
+                                        "setting": g.premise.setting(e), "rules": ISEKAI_RULES_IN_WORDS})
             return self._send(200, {"ok": True, "era": ERA, "setting": e["setting"],
                                     "rules": RULES_IN_WORDS})
         if self.path.startswith("/characters"):
@@ -819,8 +935,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not prose:
                     return self._send(400, {"ok": False, "message": "There is no accepted draft to keep."})
                 # Never store unchecked prose: a commit re-runs the hard checks on exactly what is sent.
-                e = eras.get(ERA)
-                bad = e["meta"].search(prose)
+                e = g.get_era(ERA)
+                bad = g.meta_for(e, g.player_knows()).search(prose)
                 if bad:
                     said, _ = humanise(f"out-of-world term: '{bad.group(0)}'", ERA)
                     return self._send(400, {"ok": False, "message": said})
@@ -1053,6 +1169,20 @@ RULES_IN_WORDS = [
     "Keep to your own people's lands and history.",
     "Invent whoever you like - but give them names of their own, not famous ones.",
     "Your own words are kept. The shaping must not lose what you said.",
+]
+
+# The same rules under the isekai premise, where the player is one of the arrivals and knows it is the game.
+ISEKAI_RULES_IN_WORDS = [
+    "Write it as your own life: who you were back home, the moment it happened, waking up here in a body that is "
+    "not yours, and these first few days.",
+    "Game words are fine: you are playing World of Warcraft and you know it. What the game has later is something "
+    "you know of, not something that has happened here.",
+    "You were born and raised back home, in the United States or Canada. Nobody was born here, and nobody has been "
+    "here longer than a few days.",
+    "No great deeds yet: everyone woke at the very start of the road, untrained, and nobody has fought in this "
+    "world's wars.",
+    "Invent whoever you like - with ordinary names, not famous or real people.",
+    "Your own words are kept. The shaping must not lose what you said, or give you a real name you did not write.",
 ]
 
 TOKEN = ""

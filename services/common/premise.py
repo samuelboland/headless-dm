@@ -19,6 +19,7 @@ Seattle), what they know of the game, and how long they have been here. Stdlib o
 import datetime as dt
 import hashlib
 import random
+import re
 
 from common import site
 
@@ -156,9 +157,58 @@ def origin(guid):
 
 def origin_line(o):
     """The origin as the prompt states it."""
+    if o.get("player"):
+        return player_origin_line(o)
     return (f"Before: {o['age']} years old, from {o['place_kind']} in {o['home']}, {o['country']}; worked as "
             f"{'an' if o['job'][0] in 'aeiouAEIOU' else 'a'} {o['job']}; {o['life']}; {o['gaming']}. "
             f"When it happened they were {o['moment']}.")
+
+
+# ---------------------------------------------------------------------------
+# the player, and the characters they write for themselves (services/lore/lore_gate.py)
+#
+# The player is an arrival too, and the one who certainly knows where they are: they are playing the game. So
+# the characters they write for are kept at knows_game 2, the level awareness.py already gives every character
+# that is not a bot. Their origin is not drawn from HOMES and JOBS the way a bot's is, because the player says
+# who they were: it holds only what the player gave (their real name, where they are from) and leaves the rest
+# empty, since a drawn job or age would sit beside the player's own story and contradict it in every later
+# prompt that reads both.
+
+PLAYER_KNOWS_GAME = 2
+PLAYER_GAMING = "plays World of Warcraft, and knows this world is the game's"
+
+
+def home_country(home):
+    """The country a home back home is in, when it names one of HOMES; None when it names none of them."""
+    for place, _ in HOMES:
+        if home and re.search(r"\b" + re.escape(place) + r"\b", home, re.I):
+            return "Canada" if place in CANADA else "the United States"
+    return None
+
+
+def player_origin(earth_name=None, home=None):
+    """A player's character's origin: the same keys as origin(), with only what the player gave filled in."""
+    return dict(
+        player=True,
+        earth_name=earth_name or None,
+        home=home or None,
+        country=home_country(home),
+        place_kind=None,
+        age=None,
+        job=None,
+        life=None,
+        moment=None,
+        knows_game=PLAYER_KNOWS_GAME,
+        gaming=PLAYER_GAMING,
+    )
+
+
+def player_origin_line(o):
+    """origin_line for a player's character: what they gave, and nothing in place of what they did not."""
+    if o.get("home"):
+        where = o["home"] + (f", {o['country']}" if o.get("country") and o["country"] not in o["home"] else "")
+        return f"Before: from {where}; {o.get('gaming') or PLAYER_GAMING}; the rest is as their own story tells it."
+    return f"Before: a life back home that their own story tells; {o.get('gaming') or PLAYER_GAMING}."
 
 
 # ---------------------------------------------------------------------------
